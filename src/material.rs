@@ -10,6 +10,16 @@ pub enum PointCloudBlend {
     Opaque,
 }
 
+/// Point shape for rendering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PointCloudShape {
+    /// Soft circular dot with smooth edges.
+    #[default]
+    Circle,
+    /// Square (no discard, no smoothstep — cheapest).
+    Square,
+}
+
 /// Create a minimal quad mesh (6 vertices, 2 triangles) used as the billboard
 /// template for instanced point cloud rendering. Each point is one instance.
 pub fn make_point_cloud_mesh() -> Mesh {

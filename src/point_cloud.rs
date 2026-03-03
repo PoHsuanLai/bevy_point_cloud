@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
-use crate::material::PointCloudBlend;
+use crate::material::{PointCloudBlend, PointCloudShape};
 
 /// Per-point data uploaded to the GPU via storage buffer.
 ///
@@ -55,8 +55,8 @@ impl PointCloud {
 
 /// Optional rendering settings for a point cloud entity.
 ///
-/// Controls blend mode, size attenuation, and base scale. When not present,
-/// defaults apply (additive blend, no attenuation, base_scale = 500).
+/// Controls blend mode, size attenuation, opacity, and point shape.
+/// When not present, defaults apply.
 ///
 /// ```ignore
 /// commands.spawn((
@@ -64,15 +64,22 @@ impl PointCloud {
 ///     PointCloudSettings {
 ///         blend: PointCloudBlend::Alpha,
 ///         size_attenuation: true,
-///         base_scale: 300.0,
+///         opacity: 0.5,
+///         shape: PointCloudShape::Square,
+///         ..default()
 ///     },
 /// ));
 /// ```
 #[derive(Component, Clone, Debug)]
 pub struct PointCloudSettings {
     pub blend: PointCloudBlend,
+    /// When true, `PointData::size` is in world units and shrinks with distance.
+    /// When false (default), `PointData::size` is in screen pixels.
     pub size_attenuation: bool,
-    pub base_scale: f32,
+    /// Global opacity multiplier (0.0–1.0). Applied on top of per-point alpha.
+    pub opacity: f32,
+    /// Point shape: circle (soft dot) or square.
+    pub shape: PointCloudShape,
 }
 
 impl Default for PointCloudSettings {
@@ -80,7 +87,8 @@ impl Default for PointCloudSettings {
         Self {
             blend: PointCloudBlend::default(),
             size_attenuation: false,
-            base_scale: 500.0,
+            opacity: 1.0,
+            shape: PointCloudShape::default(),
         }
     }
 }

@@ -48,14 +48,15 @@ pub struct ExtractedPointCloud {
 
 /// GPU-side parameters uniform.
 ///
-/// Layout: mat4x4 (64 bytes) + size_attenuation (4) + base_scale (4) + pad (8) = 80 bytes.
+/// Layout: mat4x4 (64 bytes) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, bytemuck::Zeroable)]
 pub struct GpuPointCloudParams {
     pub world_from_local: [f32; 16],
     pub size_attenuation: u32,
-    pub base_scale: f32,
-    pub _pad: [f32; 2],
+    pub opacity: f32,
+    pub shape: u32,
+    pub _pad: u32,
 }
 
 impl Default for GpuPointCloudParams {
@@ -63,8 +64,9 @@ impl Default for GpuPointCloudParams {
         Self {
             world_from_local: Mat4::IDENTITY.to_cols_array(),
             size_attenuation: 0,
-            base_scale: 500.0,
-            _pad: [0.0; 2],
+            opacity: 1.0,
+            shape: 0,
+            _pad: 0,
         }
     }
 }
@@ -74,15 +76,16 @@ impl GpuPointCloudParams {
         settings: Option<&PointCloudSettings>,
         transform: &GlobalTransform,
     ) -> Self {
-        let (size_attenuation, base_scale) = match settings {
-            Some(s) => (s.size_attenuation as u32, s.base_scale),
-            None => (0, 500.0),
+        let (size_attenuation, opacity, shape) = match settings {
+            Some(s) => (s.size_attenuation as u32, s.opacity, s.shape as u32),
+            None => (0, 1.0, 0),
         };
         Self {
             world_from_local: transform.to_matrix().to_cols_array(),
             size_attenuation,
-            base_scale,
-            _pad: [0.0; 2],
+            opacity,
+            shape,
+            _pad: 0,
         }
     }
 }
@@ -163,7 +166,7 @@ fn init_pipeline(
             },
             BindGroupLayoutEntry {
                 binding: 1,
-                visibility: ShaderStages::VERTEX,
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,

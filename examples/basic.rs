@@ -22,16 +22,11 @@ fn main() {
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup)
-        .add_systems(Update, auto_screenshot)
+        .add_systems(Update, take_screenshot)
         .run();
 }
 
-#[derive(Resource)]
-struct ScreenshotTimer(u32);
-
 fn setup(mut commands: Commands) {
-    commands.insert_resource(ScreenshotTimer(0));
-
     let num_points = 10_000;
     let mut points = Vec::with_capacity(num_points);
 
@@ -59,16 +54,32 @@ fn setup(mut commands: Commands) {
         ));
     }
 
-    // Additive blend (default) — no settings needed
+    // Additive blend (default) — size in pixels
     commands.spawn(PointCloud::new(points.clone()));
 
-    // Alpha blend with Transform offset — uses PointCloudSettings
+    // Alpha blend with size attenuation — size in world units
+    // Use fewer, smaller points so individual dots are clearly visible
+    let world_points: Vec<PointData> = (0..2_000)
+        .map(|i| {
+            let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
+            let theta = 2.0 * std::f32::consts::PI * (i as f32 / golden);
+            let phi = (1.0 - 2.0 * (i as f32 + 0.5) / 2_000.0).acos();
+            let radius = 5.0;
+            let x = radius * phi.sin() * theta.cos();
+            let y = radius * phi.sin() * theta.sin();
+            let z = radius * phi.cos();
+            let r = 0.3 + 0.7 * ((x / radius + 1.0) * 0.5);
+            let g = 0.2 + 0.6 * ((y / radius + 1.0) * 0.5);
+            let b = 0.4 + 0.6 * ((z / radius + 1.0) * 0.5);
+            PointData::new(Vec3::new(x, y, z), 0.15, Vec4::new(r, g, b, 0.9))
+        })
+        .collect();
     commands.spawn((
-        PointCloud::new(points),
+        PointCloud::new(world_points),
         PointCloudSettings {
             blend: PointCloudBlend::Alpha,
             size_attenuation: true,
-            base_scale: 300.0,
+            ..default()
         },
         Transform::from_xyz(12.0, 0.0, 0.0),
     ));
@@ -82,19 +93,11 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-fn auto_screenshot(
-    mut commands: Commands,
-    mut timer: ResMut<ScreenshotTimer>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    timer.0 += 1;
-    if timer.0 == 10 {
+fn take_screenshot(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
+    if keys.just_pressed(KeyCode::KeyS) {
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk("/tmp/point_cloud_basic.png"));
         info!("Screenshot → /tmp/point_cloud_basic.png");
-    }
-    if timer.0 == 20 {
-        exit.write(AppExit::Success);
     }
 }

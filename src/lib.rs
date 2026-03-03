@@ -3,7 +3,7 @@ pub mod point_cloud;
 pub mod render;
 mod systems;
 
-pub use material::PointCloudBlend;
+pub use material::{PointCloudBlend, PointCloudShape};
 pub use point_cloud::{PointCloud, PointCloudSettings, PointData};
 
 use bevy::prelude::*;

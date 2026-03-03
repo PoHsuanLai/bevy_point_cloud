@@ -22,12 +22,9 @@ fn main() {
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup)
-        .add_systems(Update, (take_screenshot, auto_screenshot))
+        .add_systems(Update, take_screenshot)
         .run();
 }
-
-#[derive(Resource)]
-struct ScreenshotTimer(u32);
 
 #[allow(clippy::excessive_precision)]
 fn hash(x: f32, y: f32) -> f32 {
@@ -75,8 +72,6 @@ fn terrain_height(x_frac: f32) -> f32 {
 }
 
 fn setup(mut commands: Commands) {
-    commands.insert_resource(ScreenshotTimer(0));
-
     let terrain_height_scale = 14.0;
     let terrain_width = 26.0;
     let terrain_depth = 4.0;
@@ -220,22 +215,5 @@ fn take_screenshot(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk("/tmp/point_cloud_terrain.png"));
         info!("Screenshot → /tmp/point_cloud_terrain.png");
-    }
-}
-
-fn auto_screenshot(
-    mut commands: Commands,
-    mut timer: ResMut<ScreenshotTimer>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    timer.0 += 1;
-    if timer.0 == 10 {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk("/tmp/point_cloud_terrain.png"));
-        info!("Screenshot → /tmp/point_cloud_terrain.png");
-    }
-    if timer.0 == 20 {
-        exit.write(AppExit::Success);
     }
 }

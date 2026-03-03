@@ -13,8 +13,9 @@ struct PointData {
 struct PointCloudParams {
     world_from_local: mat4x4<f32>,
     size_attenuation: u32,
-    base_scale: f32,
-    _pad: vec2<f32>,
+    opacity: f32,
+    shape: u32, // 0 = circle, 1 = square
+    _pad: u32,
 }
 
 @group(3) @binding(0)
@@ -71,10 +72,13 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
     // Project point center to clip space
     let clip_center = view.clip_from_world * vec4(world_pos, 1.0);
 
-    // Compute effective point size
+    // Compute effective point size (in pixels)
     var effective_size = point.size;
     if params.size_attenuation == 1u {
-        effective_size = point.size * params.base_scale / clip_center.w;
+        // size is in world units → project to pixels using camera FOV
+        // clip_from_world[1][1] = 1 / tan(fov_y / 2)
+        let resolution = view.viewport.zw;
+        effective_size = point.size * resolution.y * view.clip_from_world[1][1] / (2.0 * clip_center.w);
     }
 
     // Screen-space pixel offset → clip space
@@ -90,12 +94,18 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
 
 @fragment
 fn fragment(in: PcVertexOutput) -> @location(0) vec4<f32> {
-    let dist = length(in.quad_uv);
-    if dist > 1.0 {
-        discard;
-    }
+    var alpha = in.color.a;
 
-    // Soft circular dot
-    let alpha = smoothstep(1.0, 0.7, dist) * in.color.a;
+    if params.shape == 0u {
+        // Circle: discard outside radius, soft edge
+        let dist = length(in.quad_uv);
+        if dist > 1.0 {
+            discard;
+        }
+        alpha = smoothstep(1.0, 0.7, dist) * alpha;
+    }
+    // shape == 1: square — no discard, no smoothstep
+
+    alpha *= params.opacity;
     return vec4(in.color.rgb, alpha);
 }
