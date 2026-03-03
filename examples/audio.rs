@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::NoIndirectDrawing;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
@@ -191,6 +192,7 @@ fn setup(mut commands: Commands) {
             target_focus: Vec3::new(0.0, 4.0, 0.0),
             ..default()
         },
+        NoIndirectDrawing,
     ));
 }
 

@@ -11,6 +11,7 @@
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::NoIndirectDrawing;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
@@ -446,7 +447,6 @@ fn setup(mut commands: Commands) {
         + 4 * 600; // separators
     info!("Dashboard total points: ~{total}");
 
-    // Camera — front view looking at center of dashboard
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
@@ -455,6 +455,7 @@ fn setup(mut commands: Commands) {
             target_focus: Vec3::new(0.0, 6.0, 0.0),
             ..default()
         },
+        NoIndirectDrawing,
     ));
 }
 

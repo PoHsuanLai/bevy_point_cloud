@@ -32,11 +32,14 @@ pub use point_cloud::{PointCloud, PointCloudSettings, PointData};
 use bevy::prelude::*;
 
 /// Instanced point cloud rendering for Bevy.
+///
+/// Cameras that render point clouds must have `NoIndirectDrawing` inserted,
+/// otherwise Bevy's GPU preprocessing remaps instance indices.
 pub struct PointCloudPlugin;
 
 impl Plugin for PointCloudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(render::PointCloudRenderPlugin)
-            .add_systems(Update, (systems::init_point_clouds, systems::setup_cameras));
+            .add_systems(Update, systems::init_point_clouds);
     }
 }

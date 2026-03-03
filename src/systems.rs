@@ -1,6 +1,5 @@
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
-use bevy::render::view::NoIndirectDrawing;
 
 use crate::material::make_point_cloud_mesh;
 use crate::point_cloud::PointCloud;
@@ -19,15 +18,5 @@ pub fn init_point_clouds(
         }
 
         cmds.insert((Visibility::default(), NoFrustumCulling));
-    }
-}
-
-/// Without NoIndirectDrawing, Bevy's GPU preprocessing remaps instance indices.
-pub fn setup_cameras(
-    mut commands: Commands,
-    cameras: Query<Entity, (With<Camera3d>, Without<NoIndirectDrawing>)>,
-) {
-    for entity in &cameras {
-        commands.entity(entity).insert(NoIndirectDrawing);
     }
 }

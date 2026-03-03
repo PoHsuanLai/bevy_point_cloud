@@ -4,6 +4,7 @@
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::render::view::NoIndirectDrawing;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
@@ -84,12 +85,13 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(12.0, 0.0, 0.0),
     ));
 
-    // Camera
+    // Camera — NoIndirectDrawing is required for point cloud instancing
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
         Transform::from_xyz(6.0, 0.0, 25.0).looking_at(Vec3::new(6.0, 0.0, 0.0), Vec3::Y),
         PanOrbitCamera::default(),
+        NoIndirectDrawing,
     ));
 }
 
