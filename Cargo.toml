@@ -30,3 +30,7 @@ path = "examples/terrain.rs"
 [[example]]
 name = "audio"
 path = "examples/audio.rs"
+
+[[example]]
+name = "dashboard"
+path = "examples/dashboard.rs"
