@@ -1,3 +1,26 @@
+//! GPU-instanced point cloud rendering for Bevy.
+//!
+//! Renders point clouds as camera-facing billboard quads via a single instanced
+//! draw call per entity. Per-point data (position, size, color) is stored in a
+//! GPU SSBO — no per-point mesh overhead.
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use bevy::prelude::*;
+//! use bevy_point_cloud::*;
+//!
+//! App::new()
+//!     .add_plugins(DefaultPlugins)
+//!     .add_plugins(PointCloudPlugin)
+//!     .add_systems(Startup, |mut commands: Commands| {
+//!         commands.spawn(PointCloud::new(vec![
+//!             PointData::new(Vec3::ZERO, 5.0, Vec4::ONE),
+//!         ]));
+//!     })
+//!     .run();
+//! ```
+
 pub mod material;
 pub mod point_cloud;
 pub mod render;
