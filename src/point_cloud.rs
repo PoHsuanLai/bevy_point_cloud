@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
+use crate::material::PointCloudBlend;
+
 /// Per-point data uploaded to the GPU via storage buffer.
 ///
 /// Layout: position (vec3) + size (f32) + color (vec4) = 32 bytes, std430 compatible.
@@ -47,6 +49,38 @@ impl PointCloud {
         Self {
             capacity: capacity.max(points.len()),
             points,
+        }
+    }
+}
+
+/// Optional rendering settings for a point cloud entity.
+///
+/// Controls blend mode, size attenuation, and base scale. When not present,
+/// defaults apply (additive blend, no attenuation, base_scale = 500).
+///
+/// ```ignore
+/// commands.spawn((
+///     PointCloud::new(points),
+///     PointCloudSettings {
+///         blend: PointCloudBlend::Alpha,
+///         size_attenuation: true,
+///         base_scale: 300.0,
+///     },
+/// ));
+/// ```
+#[derive(Component, Clone, Debug)]
+pub struct PointCloudSettings {
+    pub blend: PointCloudBlend,
+    pub size_attenuation: bool,
+    pub base_scale: f32,
+}
+
+impl Default for PointCloudSettings {
+    fn default() -> Self {
+        Self {
+            blend: PointCloudBlend::default(),
+            size_attenuation: false,
+            base_scale: 500.0,
         }
     }
 }

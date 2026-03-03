@@ -1,7 +1,8 @@
-// Point cloud billboard shader
+// Point cloud billboard shader — instanced rendering
+// Each instance = one point. vertex_index selects quad corner (0-5).
+// instance_index selects point data from the SSBO.
 
 #import bevy_pbr::mesh_view_bindings::view
-#import bevy_pbr::mesh_functions::get_world_from_local
 
 struct PointData {
     position: vec3<f32>,
@@ -10,14 +11,16 @@ struct PointData {
 }
 
 struct PointCloudParams {
+    world_from_local: mat4x4<f32>,
     size_attenuation: u32,
     base_scale: f32,
+    _pad: vec2<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0)
+@group(3) @binding(0)
 var<storage, read> points: array<PointData>;
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(1)
+@group(3) @binding(1)
 var<uniform> params: PointCloudParams;
 
 struct PcVertex {
@@ -36,7 +39,7 @@ struct PcVertexOutput {
 
 @vertex
 fn vertex(in: PcVertex) -> PcVertexOutput {
-    let point_index = in.vertex_index / 6u;
+    let point_index = in.instance_index;
     let corner = in.vertex_index % 6u;
     let num_points = arrayLength(&points);
 
@@ -51,9 +54,7 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
 
     let point = points[point_index];
 
-    // CCW winding for front-facing billboards:
-    // Triangle 1: BL → BR → TR
-    // Triangle 2: BL → TR → TL
+    // Billboard quad corners (2 triangles, CCW winding)
     var offsets = array<vec2<f32>, 6>(
         vec2(-1.0, -1.0),  // BL
         vec2( 1.0, -1.0),  // BR
@@ -64,8 +65,8 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
     );
     let offset = offsets[corner];
 
-    // Apply entity Transform to point position
-    let world_pos = (get_world_from_local(in.instance_index) * vec4(point.position, 1.0)).xyz;
+    // Transform point from local to world space
+    let world_pos = (params.world_from_local * vec4(point.position, 1.0)).xyz;
 
     // Project point center to clip space
     let clip_center = view.clip_from_world * vec4(world_pos, 1.0);
@@ -73,7 +74,6 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
     // Compute effective point size
     var effective_size = point.size;
     if params.size_attenuation == 1u {
-        // Perspective: size decreases with distance
         effective_size = point.size * params.base_scale / clip_center.w;
     }
 
@@ -95,7 +95,7 @@ fn fragment(in: PcVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Sharp pinprick dot with slight soft edge
+    // Soft circular dot
     let alpha = smoothstep(1.0, 0.7, dist) * in.color.a;
-    return vec4(in.color.rgb * alpha, alpha);
+    return vec4(in.color.rgb, alpha);
 }

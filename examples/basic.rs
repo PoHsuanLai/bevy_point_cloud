@@ -59,14 +59,25 @@ fn setup(mut commands: Commands) {
         ));
     }
 
-    // Just spawn PointCloud — the plugin handles mesh + material creation
-    commands.spawn(PointCloud::new(points));
+    // Additive blend (default) — no settings needed
+    commands.spawn(PointCloud::new(points.clone()));
+
+    // Alpha blend with Transform offset — uses PointCloudSettings
+    commands.spawn((
+        PointCloud::new(points),
+        PointCloudSettings {
+            blend: PointCloudBlend::Alpha,
+            size_attenuation: true,
+            base_scale: 300.0,
+        },
+        Transform::from_xyz(12.0, 0.0, 0.0),
+    ));
 
     // Camera
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
-        Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(6.0, 0.0, 25.0).looking_at(Vec3::new(6.0, 0.0, 0.0), Vec3::Y),
         PanOrbitCamera::default(),
     ));
 }
