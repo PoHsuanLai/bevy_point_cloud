@@ -2,10 +2,9 @@
 //!
 //! Run: cargo run --example terrain
 
-use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::render::storage::ShaderStorageBuffer;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
 
@@ -30,97 +29,192 @@ fn main() {
 #[derive(Resource)]
 struct ScreenshotTimer(u32);
 
-/// Simple hash for pseudo-random scatter.
+#[allow(clippy::excessive_precision)]
 fn hash(x: f32, y: f32) -> f32 {
     let h = x * 127.1 + y * 311.7;
     (h.sin() * 43758.5453).fract().abs()
 }
 
-/// Generate synthetic waveform peaks resembling audio.
-fn generate_peaks(num_peaks: usize, freq: f32, noise: f32) -> Vec<f32> {
-    (0..num_peaks)
-        .map(|i| {
-            let t = i as f32 / num_peaks as f32;
-            let envelope = (t * 5.0).min(1.0) * ((1.0 - t) * 4.0).min(1.0);
-            let s1 = (t * freq * std::f32::consts::TAU).sin().abs();
-            let s2 = (t * freq * 2.3 * std::f32::consts::TAU + 0.7).sin().abs() * 0.4;
-            let s3 = (t * freq * 0.5 * std::f32::consts::TAU + 1.3).sin().abs() * 0.3;
-            let hash_val = ((i as f32 * 0.618033988) % 1.0 * 2.0 - 1.0).abs();
-            ((s1 + s2 + s3 + hash_val * noise) * envelope * 0.5).clamp(0.0, 1.0)
-        })
-        .collect()
+#[allow(clippy::excessive_precision)]
+fn hash2(x: f32, y: f32) -> f32 {
+    let h = x * 269.5 + y * 183.3;
+    (h.sin() * 28947.7134).fract().abs()
 }
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<PointCloudMaterial>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
+/// Terrain height function — dramatic central mountain with ridges.
+fn terrain_height(x_frac: f32) -> f32 {
+    // Dominant central peak (left of center, tall and narrow)
+    let center = 0.35;
+    let sigma = 0.14;
+    let dx = x_frac - center;
+    let central = (-dx * dx / (2.0 * sigma * sigma)).exp();
+
+    // Secondary peaks creating ridge structure
+    let center2 = 0.55;
+    let sigma2 = 0.10;
+    let dx2 = x_frac - center2;
+    let secondary = 0.45 * (-dx2 * dx2 / (2.0 * sigma2 * sigma2)).exp();
+
+    let center3 = 0.72;
+    let sigma3 = 0.08;
+    let dx3 = x_frac - center3;
+    let tertiary = 0.25 * (-dx3 * dx3 / (2.0 * sigma3 * sigma3)).exp();
+
+    // Multi-frequency ridges for texture
+    let t = x_frac * std::f32::consts::TAU;
+    let ridges = 0.6
+        + 0.25 * (t * 8.0).sin().abs()
+        + 0.12 * (t * 15.0 + 0.7).sin().abs()
+        + 0.08 * (t * 27.0 + 2.1).sin().abs()
+        + 0.04 * (t * 50.0 + 0.3).sin().abs();
+
+    // Envelope: fade in/out at edges
+    let envelope = (x_frac * 10.0).min(1.0) * ((1.0 - x_frac) * 8.0).min(1.0);
+
+    (central + secondary + tertiary) * ridges * envelope
+}
+
+fn setup(mut commands: Commands) {
     commands.insert_resource(ScreenshotTimer(0));
 
-    let cols = 400;
-    let rows = 80;
-    let terrain_height = 6.0;
-    let terrain_width = 30.0;
-    let terrain_depth = 8.0;
+    let terrain_height_scale = 14.0;
+    let terrain_width = 26.0;
+    let terrain_depth = 4.0;
 
-    let peaks = generate_peaks(cols, 5.0, 0.3);
-    let mut points = Vec::with_capacity(cols * rows);
+    let mut points = Vec::with_capacity(300_000);
 
+    // === Layer 1: Dense surface grid (~120K) ===
+    let cols = 900;
+    let rows = 180;
     for col in 0..cols {
         let x_frac = col as f32 / (cols - 1) as f32;
         let x = x_frac * terrain_width - terrain_width / 2.0;
-        let amplitude = peaks[col];
+        let base_h = terrain_height(x_frac) * terrain_height_scale;
 
         for row in 0..rows {
             let z_frac = row as f32 / (rows - 1) as f32;
             let z = (z_frac - 0.5) * terrain_depth;
 
-            // Ridge taper: peak at center, zero at edges
-            let taper = 1.0 - (2.0 * z_frac - 1.0).powi(2);
+            // Sharper ridge taper: gaussian cross-section instead of parabolic
+            let z_norm = 2.0 * z_frac - 1.0;
+            let taper = (-z_norm * z_norm * 3.0).exp();
 
-            // Pseudo-random scatter for particle cloud look
-            let scatter = hash(x_frac * 1000.0, z_frac * 1000.0);
-            let y = amplitude * terrain_height * taper * (0.6 + scatter * 0.4);
+            let scatter = hash(col as f32 * 0.73, row as f32 * 1.17);
+            let y = base_h * taper * (0.75 + scatter * 0.25);
 
-            if y < 0.05 { continue; }
+            if y < 0.05 {
+                continue;
+            }
 
-            let brightness = (y / terrain_height).powf(0.6) * 0.9 + 0.1;
+            // Brighter at higher elevations — push toward white at peaks
+            let h_ratio = (y / terrain_height_scale).min(1.0);
+            let brightness = h_ratio.powf(0.3) * 0.85 + 0.15;
 
             points.push(PointData::new(
                 Vec3::new(x, y, z),
-                2.5,
-                Vec4::new(brightness, brightness, brightness * 1.05, brightness),
+                1.3,
+                Vec4::new(brightness, brightness, brightness * 1.02, brightness),
             ));
         }
     }
 
-    let buffer = buffers.add(points_to_ssbo(&points));
-    let mat = materials.add(PointCloudMaterial { buffer });
-    let mesh = meshes.add(make_point_cloud_mesh(points.len()));
+    // === Layer 2: Volume fill (~120K) ===
+    let volume_count = 150_000;
+    for i in 0..volume_count {
+        let r1 = hash(i as f32 * 0.1234, i as f32 * 0.5678);
+        let r2 = hash2(i as f32 * 0.9876, i as f32 * 0.3456);
+        let r3 = hash(i as f32 * 0.2468 + 100.0, i as f32 * 0.1357);
+        let r4 = hash2(i as f32 * 0.8642, i as f32 * 0.7531 + 50.0);
 
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(mat),
-        PointCloud { points },
-    ));
+        let x_frac = r1;
+        let x = x_frac * terrain_width - terrain_width / 2.0;
+        let base_h = terrain_height(x_frac) * terrain_height_scale;
 
+        if base_h < 0.3 {
+            continue;
+        }
+
+        let z_frac = r2;
+        let z = (z_frac - 0.5) * terrain_depth;
+        let z_norm = 2.0 * z_frac - 1.0;
+        let taper = (-z_norm * z_norm * 3.0).exp();
+
+        // Bias Y toward the surface: use r3^2 to concentrate near surface
+        let y = r3 * r3 * base_h * taper * 1.05;
+        if y < 0.05 {
+            continue;
+        }
+
+        // Probability falloff: more likely to keep points near surface
+        let height_ratio = y / (base_h * taper).max(0.01);
+        if r4 > (1.0 - height_ratio * 0.3).max(0.15) {
+            continue;
+        }
+
+        let h_ratio = (y / terrain_height_scale).min(1.0);
+        let brightness = h_ratio.powf(0.5) * 0.7 + 0.1;
+
+        points.push(PointData::new(
+            Vec3::new(x, y, z),
+            1.0,
+            Vec4::new(brightness, brightness, brightness * 1.03, brightness * 0.85),
+        ));
+    }
+
+    // === Layer 3: Spray/mist (~25K) ===
+    let spray_count = 40_000;
+    for i in 0..spray_count {
+        let r1 = hash(i as f32 * 0.3141 + 500.0, i as f32 * 0.2718);
+        let r2 = hash2(i as f32 * 0.1618 + 200.0, i as f32 * 0.4142);
+        #[allow(clippy::approx_constant)]
+        let r3 = hash(i as f32 * 0.7071 + 300.0, i as f32 * 0.5774);
+        let r4 = hash2(i as f32 * 0.4321 + 400.0, i as f32 * 0.8765);
+
+        let x_frac = r1;
+        let x = x_frac * terrain_width - terrain_width / 2.0;
+        let base_h = terrain_height(x_frac) * terrain_height_scale;
+
+        if base_h < 0.8 {
+            continue;
+        }
+
+        let z = (r2 - 0.5) * terrain_depth * 1.5; // wider Z spread
+
+        // Y: extends above the surface, biased toward top
+        let y = base_h * (0.6 + r3 * 0.8);
+
+        // Sparser further from peak
+        if r4 > (base_h / terrain_height_scale).powf(0.3) {
+            continue;
+        }
+
+        let brightness = 0.1 + r3 * 0.3;
+
+        points.push(PointData::new(
+            Vec3::new(x, y, z),
+            0.7,
+            Vec4::new(brightness, brightness, brightness, brightness * 0.5),
+        ));
+    }
+
+    info!("Total points: {}", points.len());
+
+    // Just spawn PointCloud — the plugin handles mesh + material creation
+    commands.spawn(PointCloud::new(points));
+
+    // Camera: slightly below peak, looking at the mountain center
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,
-        Transform::from_xyz(0.0, 12.0, 20.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
+        Transform::from_xyz(2.0, 5.0, 20.0).looking_at(Vec3::new(-1.0, 5.0, 0.0), Vec3::Y),
         PanOrbitCamera {
-            target_focus: Vec3::new(0.0, 2.0, 0.0),
+            target_focus: Vec3::new(-1.0, 5.0, 0.0),
             ..default()
         },
     ));
 }
 
-fn take_screenshot(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-) {
+fn take_screenshot(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::KeyS) {
         commands
             .spawn(Screenshot::primary_window())

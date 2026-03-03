@@ -2,10 +2,9 @@
 //!
 //! Run: cargo run --example basic
 
-use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::render::storage::ShaderStorageBuffer;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
 
@@ -30,12 +29,7 @@ fn main() {
 #[derive(Resource)]
 struct ScreenshotTimer(u32);
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<PointCloudMaterial>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
+fn setup(mut commands: Commands) {
     commands.insert_resource(ScreenshotTimer(0));
 
     let num_points = 10_000;
@@ -65,15 +59,8 @@ fn setup(
         ));
     }
 
-    let buffer = buffers.add(points_to_ssbo(&points));
-    let mat = materials.add(PointCloudMaterial { buffer });
-    let mesh = meshes.add(make_point_cloud_mesh(num_points));
-
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(mat),
-        PointCloud { points },
-    ));
+    // Just spawn PointCloud — the plugin handles mesh + material creation
+    commands.spawn(PointCloud::new(points));
 
     // Camera
     commands.spawn((
@@ -90,7 +77,6 @@ fn auto_screenshot(
     mut exit: MessageWriter<AppExit>,
 ) {
     timer.0 += 1;
-    // Wait a few frames for the GPU to render, then screenshot and exit
     if timer.0 == 10 {
         commands
             .spawn(Screenshot::primary_window())

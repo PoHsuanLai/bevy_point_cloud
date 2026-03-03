@@ -22,9 +22,31 @@ impl PointData {
     }
 }
 
-/// Component holding point cloud data. Attach to an entity alongside
-/// `Mesh3d` and `MeshMaterial3d<PointCloudMaterial>`.
+/// Component holding point cloud data.
+///
+/// Just spawn this component — the plugin auto-creates the mesh and material:
+/// ```ignore
+/// commands.spawn(PointCloud::new(points));
+/// ```
 #[derive(Component, Clone, Debug, Default)]
 pub struct PointCloud {
     pub points: Vec<PointData>,
+    /// Pre-allocated capacity. The mesh/SSBO are sized for this many points
+    /// to avoid rebuilds when the point count fluctuates.
+    pub capacity: usize,
+}
+
+impl PointCloud {
+    pub fn new(points: Vec<PointData>) -> Self {
+        let capacity = points.len();
+        Self { points, capacity }
+    }
+
+    /// Create with extra capacity so the mesh doesn't rebuild when points change count.
+    pub fn with_capacity(points: Vec<PointData>, capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(points.len()),
+            points,
+        }
+    }
 }

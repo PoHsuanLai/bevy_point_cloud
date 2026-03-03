@@ -2,23 +2,27 @@ pub mod material;
 pub mod point_cloud;
 mod systems;
 
-pub use material::{PointCloudMaterial, make_point_cloud_mesh};
+pub use material::{PointCloudBlend, PointCloudMaterial, PointCloudParams};
 pub use point_cloud::{PointCloud, PointData};
-pub use systems::points_to_ssbo;
 
 use bevy::prelude::*;
 
 /// Plugin that enables point cloud rendering.
 ///
-/// Add this to your app, then spawn entities with:
-/// - `PointCloud` component (your point data)
-/// - `Mesh3d(meshes.add(make_point_cloud_mesh(num_points)))`
-/// - `MeshMaterial3d(materials.add(PointCloudMaterial { points: vec![...] }))`
+/// Spawn entities with just a `PointCloud` component — the plugin
+/// auto-creates the mesh and material:
+///
+/// ```ignore
+/// commands.spawn(PointCloud::new(points));
+/// ```
 pub struct PointCloudPlugin;
 
 impl Plugin for PointCloudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<PointCloudMaterial>::default())
-            .add_systems(Update, systems::sync_point_clouds);
+            .add_systems(
+                Update,
+                (systems::init_point_clouds, systems::sync_point_clouds).chain(),
+            );
     }
 }

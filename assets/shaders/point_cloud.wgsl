@@ -1,6 +1,7 @@
 // Point cloud billboard shader
 
 #import bevy_pbr::mesh_view_bindings::view
+#import bevy_pbr::mesh_functions::get_world_from_local
 
 struct PointData {
     position: vec3<f32>,
@@ -8,8 +9,16 @@ struct PointData {
     color: vec4<f32>,
 }
 
+struct PointCloudParams {
+    size_attenuation: u32,
+    base_scale: f32,
+}
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)
 var<storage, read> points: array<PointData>;
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(1)
+var<uniform> params: PointCloudParams;
 
 struct PcVertex {
     @builtin(vertex_index) vertex_index: u32,
@@ -43,7 +52,7 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
     let point = points[point_index];
 
     // CCW winding for front-facing billboards:
-    // Triangle 1: BL → BR → TR (CCW from front = +Z)
+    // Triangle 1: BL → BR → TR
     // Triangle 2: BL → TR → TL
     var offsets = array<vec2<f32>, 6>(
         vec2(-1.0, -1.0),  // BL
@@ -55,12 +64,22 @@ fn vertex(in: PcVertex) -> PcVertexOutput {
     );
     let offset = offsets[corner];
 
+    // Apply entity Transform to point position
+    let world_pos = (get_world_from_local(in.instance_index) * vec4(point.position, 1.0)).xyz;
+
     // Project point center to clip space
-    let clip_center = view.clip_from_world * vec4(point.position, 1.0);
+    let clip_center = view.clip_from_world * vec4(world_pos, 1.0);
+
+    // Compute effective point size
+    var effective_size = point.size;
+    if params.size_attenuation == 1u {
+        // Perspective: size decreases with distance
+        effective_size = point.size * params.base_scale / clip_center.w;
+    }
 
     // Screen-space pixel offset → clip space
     let resolution = view.viewport.zw;
-    let pixel_offset = offset * point.size;
+    let pixel_offset = offset * effective_size;
     let clip_offset = pixel_offset * 2.0 * clip_center.w / resolution;
 
     out.clip_position = clip_center + vec4(clip_offset, 0.0, 0.0);
@@ -76,6 +95,7 @@ fn fragment(in: PcVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let alpha = smoothstep(1.0, 0.2, dist) * in.color.a;
+    // Sharp pinprick dot with slight soft edge
+    let alpha = smoothstep(1.0, 0.7, dist) * in.color.a;
     return vec4(in.color.rgb * alpha, alpha);
 }
