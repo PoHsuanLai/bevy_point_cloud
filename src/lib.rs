@@ -8,14 +8,7 @@ pub use point_cloud::{PointCloud, PointCloudSettings, PointData};
 
 use bevy::prelude::*;
 
-/// Plugin that enables point cloud rendering.
-///
-/// Spawn entities with just a `PointCloud` component — the plugin
-/// auto-creates the mesh and handles GPU buffer management:
-///
-/// ```ignore
-/// commands.spawn(PointCloud::new(points));
-/// ```
+/// Instanced point cloud rendering for Bevy.
 pub struct PointCloudPlugin;
 
 impl Plugin for PointCloudPlugin {

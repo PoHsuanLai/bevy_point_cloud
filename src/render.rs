@@ -36,9 +36,6 @@ use crate::{
 
 const SHADER_PATH: &str = "shaders/point_cloud.wgsl";
 
-// === Extracted data ===
-
-/// Extracted point cloud data for the render world.
 #[derive(Component, Clone)]
 pub struct ExtractedPointCloud {
     pub points: Vec<PointData>,
@@ -46,9 +43,7 @@ pub struct ExtractedPointCloud {
     pub blend: PointCloudBlend,
 }
 
-/// GPU-side parameters uniform.
-///
-/// Layout: mat4x4 (64 bytes) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
+/// Layout: mat4x4 (64) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, bytemuck::Zeroable)]
 pub struct GpuPointCloudParams {
@@ -90,8 +85,6 @@ impl GpuPointCloudParams {
     }
 }
 
-// === Extraction (Changed-based) ===
-
 #[allow(clippy::type_complexity)]
 fn extract_point_clouds(
     mut commands: Commands,
@@ -126,19 +119,15 @@ fn extract_point_clouds(
     }
 }
 
-// === GPU buffers ===
-
 #[derive(Component)]
 pub struct PointCloudGpuBuffers {
     pub ssbo: Buffer,
     pub params_buffer: Buffer,
     pub bind_group: BindGroup,
     pub instance_count: u32,
-    /// Capacity of the SSBO in number of points. Only reallocate when exceeded.
+    /// Only reallocate SSBO when point count exceeds this.
     pub ssbo_capacity: u32,
 }
-
-// === Pipeline ===
 
 #[derive(Resource)]
 pub struct PointCloudPipeline {
@@ -201,10 +190,8 @@ impl SpecializedMeshPipeline for PointCloudPipeline {
             fragment.shader = self.shader.clone();
         }
 
-        // Billboard quads have arbitrary normals — disable culling
         descriptor.primitive.cull_mode = None;
 
-        // Blend mode: encoded in key by queue system
         let blend_bits = key.intersection(MeshPipelineKey::BLEND_RESERVED_BITS);
         if blend_bits == MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA {
             if let Some(ref mut fragment) = descriptor.fragment
@@ -245,8 +232,6 @@ impl SpecializedMeshPipeline for PointCloudPipeline {
     }
 }
 
-// === Queue ===
-
 #[allow(clippy::too_many_arguments)]
 fn queue_point_clouds(
     transparent_draw_functions: Res<DrawFunctions<Transparent3d>>,
@@ -279,7 +264,6 @@ fn queue_point_clouds(
                 continue;
             };
 
-            // Encode blend mode into pipeline key
             let blend_key = match extracted.blend {
                 PointCloudBlend::Additive => MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA,
                 PointCloudBlend::Alpha => MeshPipelineKey::BLEND_ALPHA,
@@ -308,8 +292,6 @@ fn queue_point_clouds(
     }
 }
 
-// === Prepare ===
-
 fn prepare_point_cloud_buffers(
     mut commands: Commands,
     query: Query<(Entity, &ExtractedPointCloud, Option<&PointCloudGpuBuffers>)>,
@@ -325,10 +307,8 @@ fn prepare_point_cloud_buffers(
         if let Some(buffers) = existing
             && point_count <= buffers.ssbo_capacity
         {
-            // Reuse existing buffers — just upload new data
             render_queue.write_buffer(&buffers.ssbo, 0, point_bytes);
             render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
-            // Update instance count (bind group unchanged since buffer handles are the same)
             commands.entity(entity).insert(PointCloudGpuBuffers {
                 ssbo: buffers.ssbo.clone(),
                 params_buffer: buffers.params_buffer.clone(),
@@ -339,7 +319,6 @@ fn prepare_point_cloud_buffers(
             continue;
         }
 
-        // Allocate new buffers (first time or capacity exceeded)
         // Over-allocate by 25% to reduce future reallocations
         let capacity = (point_count + point_count / 4).max(64);
         let ssbo_size = capacity as u64 * std::mem::size_of::<PointData>() as u64;
@@ -382,8 +361,6 @@ fn prepare_point_cloud_buffers(
         });
     }
 }
-
-// === Draw command ===
 
 type DrawPointCloud = (
     SetItemPipeline,
@@ -484,13 +461,10 @@ impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudInstanced {
     }
 }
 
-// === Plugin ===
-
 pub struct PointCloudRenderPlugin;
 
 impl Plugin for PointCloudRenderPlugin {
     fn build(&self, app: &mut App) {
-        // SyncToRenderWorld is required for extraction — register on PointCloud
         app.add_plugins(SyncComponentPlugin::<PointCloud>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

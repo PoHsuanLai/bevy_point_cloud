@@ -1,7 +1,6 @@
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-/// Blending mode for point cloud rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PointCloudBlend {
     #[default]
@@ -10,18 +9,14 @@ pub enum PointCloudBlend {
     Opaque,
 }
 
-/// Point shape for rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PointCloudShape {
-    /// Soft circular dot with smooth edges.
     #[default]
     Circle,
-    /// Square (no discard, no smoothstep — cheapest).
     Square,
 }
 
-/// Create a minimal quad mesh (6 vertices, 2 triangles) used as the billboard
-/// template for instanced point cloud rendering. Each point is one instance.
+/// Billboard quad mesh (6 verts, 2 tris) used as the instanced template.
 pub fn make_point_cloud_mesh() -> Mesh {
     let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; 6];
     let normals = vec![[0.0_f32, 1.0, 0.0]; 6];
