@@ -21,7 +21,7 @@ use bevy::{
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
         },
         render_resource::*,
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         sync_component::SyncComponentPlugin,
         sync_world::{MainEntity, RenderEntity},
         view::ExtractedView,
@@ -134,6 +134,8 @@ pub struct PointCloudGpuBuffers {
     pub params_buffer: Buffer,
     pub bind_group: BindGroup,
     pub instance_count: u32,
+    /// Capacity of the SSBO in number of points. Only reallocate when exceeded.
+    pub ssbo_capacity: u32,
 }
 
 // === Pipeline ===
@@ -310,19 +312,45 @@ fn queue_point_clouds(
 
 fn prepare_point_cloud_buffers(
     mut commands: Commands,
-    query: Query<(Entity, &ExtractedPointCloud)>,
+    query: Query<(Entity, &ExtractedPointCloud, Option<&PointCloudGpuBuffers>)>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     pipeline: Res<PointCloudPipeline>,
 ) {
-    for (entity, extracted) in &query {
+    for (entity, extracted, existing) in &query {
         let point_bytes: &[u8] = bytemuck::cast_slice(&extracted.points);
         let param_bytes: &[u8] = bytemuck::bytes_of(&extracted.params);
+        let point_count = extracted.points.len() as u32;
 
-        let ssbo = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        if let Some(buffers) = existing
+            && point_count <= buffers.ssbo_capacity
+        {
+            // Reuse existing buffers — just upload new data
+            render_queue.write_buffer(&buffers.ssbo, 0, point_bytes);
+            render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
+            // Update instance count (bind group unchanged since buffer handles are the same)
+            commands.entity(entity).insert(PointCloudGpuBuffers {
+                ssbo: buffers.ssbo.clone(),
+                params_buffer: buffers.params_buffer.clone(),
+                bind_group: buffers.bind_group.clone(),
+                instance_count: point_count,
+                ssbo_capacity: buffers.ssbo_capacity,
+            });
+            continue;
+        }
+
+        // Allocate new buffers (first time or capacity exceeded)
+        // Over-allocate by 25% to reduce future reallocations
+        let capacity = (point_count + point_count / 4).max(64);
+        let ssbo_size = capacity as u64 * std::mem::size_of::<PointData>() as u64;
+
+        let ssbo = render_device.create_buffer(&BufferDescriptor {
             label: Some("point_cloud_ssbo"),
-            contents: point_bytes,
+            size: ssbo_size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        render_queue.write_buffer(&ssbo, 0, point_bytes);
 
         let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("point_cloud_params"),
@@ -349,7 +377,8 @@ fn prepare_point_cloud_buffers(
             ssbo,
             params_buffer,
             bind_group,
-            instance_count: extracted.points.len() as u32,
+            instance_count: point_count,
+            ssbo_capacity: capacity,
         });
     }
 }
