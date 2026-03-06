@@ -39,6 +39,7 @@ pub struct PointCloudPlugin;
 
 impl Plugin for PointCloudPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "point_cloud.wgsl");
         app.add_plugins(render::PointCloudRenderPlugin)
             .add_systems(Update, systems::init_point_clouds);
     }

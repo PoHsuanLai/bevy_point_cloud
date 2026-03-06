@@ -27,6 +27,7 @@ use bevy::{
         view::ExtractedView,
     },
 };
+use bevy::camera::visibility::RenderLayers;
 use bytemuck::Pod;
 
 use crate::{
@@ -34,13 +35,12 @@ use crate::{
     point_cloud::{PointCloud, PointCloudSettings, PointData},
 };
 
-const SHADER_PATH: &str = "shaders/point_cloud.wgsl";
-
 #[derive(Component, Clone)]
 pub struct ExtractedPointCloud {
     pub points: Vec<PointData>,
     pub params: GpuPointCloudParams,
     pub blend: PointCloudBlend,
+    pub render_layers: RenderLayers,
 }
 
 /// Layout: mat4x4 (64) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
@@ -95,16 +95,18 @@ fn extract_point_clouds(
                 &PointCloud,
                 Option<&PointCloudSettings>,
                 &GlobalTransform,
+                Option<&RenderLayers>,
             ),
             Or<(
                 Changed<PointCloud>,
                 Changed<PointCloudSettings>,
                 Changed<GlobalTransform>,
+                Added<Mesh3d>,
             )>,
         >,
     >,
 ) {
-    for (render_entity, cloud, settings, transform) in &changed {
+    for (render_entity, cloud, settings, transform, render_layers) in &changed {
         if cloud.points.is_empty() {
             commands
                 .entity(render_entity)
@@ -115,6 +117,7 @@ fn extract_point_clouds(
             points: cloud.points.clone(),
             params: GpuPointCloudParams::from_settings_and_transform(settings, transform),
             blend: settings.map(|s| s.blend).unwrap_or_default(),
+            render_layers: render_layers.cloned().unwrap_or_default(),
         });
     }
 }
@@ -168,8 +171,11 @@ fn init_pipeline(
         ],
     );
 
+    let shader: Handle<Shader> =
+        bevy::asset::load_embedded_asset!(asset_server.as_ref(), "point_cloud.wgsl");
+
     commands.insert_resource(PointCloudPipeline {
-        shader: asset_server.load(SHADER_PATH),
+        shader,
         mesh_pipeline: mesh_pipeline.clone(),
         material_layout,
     });
@@ -242,11 +248,12 @@ fn queue_point_clouds(
     render_mesh_instances: Res<RenderMeshInstances>,
     point_clouds: Query<(Entity, &MainEntity, &ExtractedPointCloud)>,
     mut transparent_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<(&ExtractedView, &Msaa)>,
+    views: Query<(&ExtractedView, &Msaa, Option<&RenderLayers>)>,
 ) {
     let draw_fn = transparent_draw_functions.read().id::<DrawPointCloud>();
 
-    for (view, msaa) in &views {
+    for (view, msaa, view_layers) in &views {
+        let view_mask = view_layers.cloned().unwrap_or_default();
         let Some(phase) = transparent_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -256,6 +263,9 @@ fn queue_point_clouds(
         let rangefinder = view.rangefinder3d();
 
         for (entity, main_entity, extracted) in &point_clouds {
+            if !view_mask.intersects(&extracted.render_layers) {
+                continue;
+            }
             let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*main_entity)
             else {
                 continue;
@@ -404,7 +414,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudInstanced {
     type ViewQuery = ();
     type ItemQuery = Read<PointCloudGpuBuffers>;
 
-    #[inline]
     fn render<'w>(
         item: &P,
         _view: (),
