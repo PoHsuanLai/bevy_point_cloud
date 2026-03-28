@@ -7,12 +7,15 @@
 //!   - Press S to take a screenshot
 //!   - Press Space to pause/resume
 
+#[path = "common/mod.rs"]
+mod common;
+
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::NoIndirectDrawing;
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_point_cloud::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -38,7 +41,7 @@ struct AudioStream(#[allow(dead_code)] cpal::Stream);
 
 #[derive(Resource)]
 struct SpectrumState {
-    history: Vec<Vec<f32>>,
+    history: VecDeque<Vec<f32>>,
     fft_scratch: Vec<Complex<f32>>,
     window: Vec<f32>,
     planner: FftPlanner<f32>,
@@ -168,13 +171,13 @@ fn main() {
         .insert_resource(shared_ring)
         .insert_non_send_resource(AudioStream(stream))
         .insert_resource(SpectrumState {
-            history: vec![vec![0.0; SPECTRUM_BINS]; HISTORY_ROWS],
+            history: VecDeque::from(vec![vec![0.0; SPECTRUM_BINS]; HISTORY_ROWS]),
             fft_scratch: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             window,
             planner: FftPlanner::new(),
         })
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_spectrum, take_screenshot, toggle_pause))
+        .add_systems(Update, (update_spectrum, common::take_screenshot, toggle_pause))
         .run();
 }
 
@@ -225,8 +228,8 @@ fn update_spectrum(
     }
 
     // Shift history and push new row
-    spectrum.history.remove(0);
-    spectrum.history.push(magnitudes);
+    spectrum.history.pop_front();
+    spectrum.history.push_back(magnitudes);
 
     // Rebuild point cloud
     let Ok(mut cloud) = clouds.single_mut() else {
@@ -280,15 +283,6 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
         3 => (p, q, v),
         4 => (t, p, v),
         _ => (v, p, q),
-    }
-}
-
-fn take_screenshot(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
-    if keys.just_pressed(KeyCode::KeyS) {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk("/tmp/point_cloud_audio.png"));
-        info!("Screenshot → /tmp/point_cloud_audio.png");
     }
 }
 

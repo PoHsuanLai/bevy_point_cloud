@@ -23,7 +23,7 @@
 
 pub mod material;
 pub mod point_cloud;
-pub mod render;
+pub(crate) mod render;
 mod systems;
 
 pub use material::{PointCloudBlend, PointCloudShape};
@@ -40,7 +40,11 @@ pub struct PointCloudPlugin;
 impl Plugin for PointCloudPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "point_cloud.wgsl");
-        app.add_plugins(render::PointCloudRenderPlugin)
+        app.register_type::<PointCloud>()
+            .register_type::<PointCloudSettings>()
+            .register_type::<PointCloudBlend>()
+            .register_type::<PointCloudShape>()
+            .add_plugins(render::PointCloudRenderPlugin)
             .add_systems(Update, systems::init_point_clouds);
     }
 }

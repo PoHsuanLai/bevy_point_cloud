@@ -35,23 +35,31 @@ use crate::{
     point_cloud::{PointCloud, PointCloudSettings, PointData},
 };
 
+/// Extracted point data — only inserted when `PointCloud` component changes.
 #[derive(Component, Clone)]
-pub struct ExtractedPointCloud {
-    pub points: Vec<PointData>,
-    pub params: GpuPointCloudParams,
-    pub blend: PointCloudBlend,
-    pub render_layers: RenderLayers,
+struct ExtractedPointCloudData {
+    points: Vec<PointData>,
+    initial_capacity: u32,
+}
+
+/// Extracted rendering params — inserted on any relevant change
+/// (transform, settings, or point data).
+#[derive(Component, Clone)]
+struct ExtractedPointCloudParams {
+    params: GpuPointCloudParams,
+    blend: PointCloudBlend,
+    render_layers: RenderLayers,
 }
 
 /// Layout: mat4x4 (64) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, bytemuck::Zeroable)]
-pub struct GpuPointCloudParams {
-    pub world_from_local: [f32; 16],
-    pub size_attenuation: u32,
-    pub opacity: f32,
-    pub shape: u32,
-    pub _pad: u32,
+pub(crate) struct GpuPointCloudParams {
+    world_from_local: [f32; 16],
+    size_attenuation: u32,
+    opacity: f32,
+    shape: u32,
+    _pad: u32,
 }
 
 impl Default for GpuPointCloudParams {
@@ -85,8 +93,30 @@ impl GpuPointCloudParams {
     }
 }
 
+/// Extract point data only when the `PointCloud` component changes.
+fn extract_point_cloud_data(
+    mut commands: Commands,
+    changed: Extract<Query<(RenderEntity, &PointCloud), Changed<PointCloud>>>,
+) {
+    for (render_entity, cloud) in &changed {
+        if cloud.points.is_empty() {
+            commands
+                .entity(render_entity)
+                .remove::<ExtractedPointCloudData>();
+            continue;
+        }
+        commands
+            .entity(render_entity)
+            .insert(ExtractedPointCloudData {
+                points: cloud.points.clone(),
+                initial_capacity: cloud.capacity as u32,
+            });
+    }
+}
+
+/// Extract rendering params on any relevant change (transform, settings, points, mesh).
 #[allow(clippy::type_complexity)]
-fn extract_point_clouds(
+fn extract_point_cloud_params(
     mut commands: Commands,
     changed: Extract<
         Query<
@@ -110,33 +140,34 @@ fn extract_point_clouds(
         if cloud.points.is_empty() {
             commands
                 .entity(render_entity)
-                .remove::<ExtractedPointCloud>();
+                .remove::<ExtractedPointCloudParams>();
             continue;
         }
-        commands.entity(render_entity).insert(ExtractedPointCloud {
-            points: cloud.points.clone(),
-            params: GpuPointCloudParams::from_settings_and_transform(settings, transform),
-            blend: settings.map(|s| s.blend).unwrap_or_default(),
-            render_layers: render_layers.cloned().unwrap_or_default(),
-        });
+        commands
+            .entity(render_entity)
+            .insert(ExtractedPointCloudParams {
+                params: GpuPointCloudParams::from_settings_and_transform(settings, transform),
+                blend: settings.map(|s| s.blend).unwrap_or_default(),
+                render_layers: render_layers.cloned().unwrap_or_default(),
+            });
     }
 }
 
 #[derive(Component)]
-pub struct PointCloudGpuBuffers {
-    pub ssbo: Buffer,
-    pub params_buffer: Buffer,
-    pub bind_group: BindGroup,
-    pub instance_count: u32,
+pub(crate) struct PointCloudGpuBuffers {
+    ssbo: Buffer,
+    params_buffer: Buffer,
+    bind_group: BindGroup,
+    instance_count: u32,
     /// Only reallocate SSBO when point count exceeds this.
-    pub ssbo_capacity: u32,
+    ssbo_capacity: u32,
 }
 
 #[derive(Resource)]
-pub struct PointCloudPipeline {
-    pub shader: Handle<Shader>,
-    pub mesh_pipeline: MeshPipeline,
-    pub material_layout: BindGroupLayout,
+struct PointCloudPipeline {
+    shader: Handle<Shader>,
+    mesh_pipeline: MeshPipeline,
+    material_layout: BindGroupLayout,
 }
 
 fn init_pipeline(
@@ -246,7 +277,12 @@ fn queue_point_clouds(
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
     render_mesh_instances: Res<RenderMeshInstances>,
-    point_clouds: Query<(Entity, &MainEntity, &ExtractedPointCloud)>,
+    point_clouds: Query<(
+        Entity,
+        &MainEntity,
+        &ExtractedPointCloudParams,
+        &PointCloudGpuBuffers,
+    )>,
     mut transparent_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<(&ExtractedView, &Msaa, Option<&RenderLayers>)>,
 ) {
@@ -262,7 +298,7 @@ fn queue_point_clouds(
         let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
         let rangefinder = view.rangefinder3d();
 
-        for (entity, main_entity, extracted) in &point_clouds {
+        for (entity, main_entity, extracted, _gpu_buffers) in &point_clouds {
             if !view_mask.intersects(&extracted.render_layers) {
                 continue;
             }
@@ -304,71 +340,82 @@ fn queue_point_clouds(
 
 fn prepare_point_cloud_buffers(
     mut commands: Commands,
-    query: Query<(Entity, &ExtractedPointCloud, Option<&PointCloudGpuBuffers>)>,
+    mut query: Query<(
+        Entity,
+        Option<&ExtractedPointCloudData>,
+        &ExtractedPointCloudParams,
+        Option<&mut PointCloudGpuBuffers>,
+    )>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline: Res<PointCloudPipeline>,
 ) {
-    for (entity, extracted, existing) in &query {
-        let point_bytes: &[u8] = bytemuck::cast_slice(&extracted.points);
-        let param_bytes: &[u8] = bytemuck::bytes_of(&extracted.params);
-        let point_count = extracted.points.len() as u32;
+    for (entity, data, params, existing) in &mut query {
+        let param_bytes: &[u8] = bytemuck::bytes_of(&params.params);
 
-        if let Some(buffers) = existing
-            && point_count <= buffers.ssbo_capacity
-        {
-            render_queue.write_buffer(&buffers.ssbo, 0, point_bytes);
+        if let Some(data) = data {
+            let point_bytes: &[u8] = bytemuck::cast_slice(&data.points);
+            let point_count = data.points.len() as u32;
+
+            if let Some(mut buffers) = existing
+                && point_count <= buffers.ssbo_capacity
+            {
+                // Reuse existing SSBO — mutate in place to avoid change-detection churn.
+                render_queue.write_buffer(&buffers.ssbo, 0, point_bytes);
+                render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
+                buffers.instance_count = point_count;
+            } else {
+                // Allocate new SSBO, respecting user-specified capacity hint.
+                let capacity = point_count.max(data.initial_capacity).max(64);
+                let capacity = capacity + capacity / 4; // 25% headroom
+                let ssbo_size = capacity as u64 * std::mem::size_of::<PointData>() as u64;
+
+                let ssbo = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("point_cloud_ssbo"),
+                    size: ssbo_size,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                render_queue.write_buffer(&ssbo, 0, point_bytes);
+
+                let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("point_cloud_params"),
+                    contents: param_bytes,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                });
+
+                let bind_group = render_device.create_bind_group(
+                    "point_cloud_bind_group",
+                    &pipeline.material_layout,
+                    &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: ssbo.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                    ],
+                );
+
+                commands.entity(entity).insert(PointCloudGpuBuffers {
+                    ssbo,
+                    params_buffer,
+                    bind_group,
+                    instance_count: point_count,
+                    ssbo_capacity: capacity,
+                });
+            }
+
+            // Remove extracted data so it's not re-uploaded next frame.
+            commands
+                .entity(entity)
+                .remove::<ExtractedPointCloudData>();
+        } else if let Some(buffers) = existing {
+            // No new point data — only update the params uniform (80 bytes).
             render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
-            commands.entity(entity).insert(PointCloudGpuBuffers {
-                ssbo: buffers.ssbo.clone(),
-                params_buffer: buffers.params_buffer.clone(),
-                bind_group: buffers.bind_group.clone(),
-                instance_count: point_count,
-                ssbo_capacity: buffers.ssbo_capacity,
-            });
-            continue;
         }
-
-        // Over-allocate by 25% to reduce future reallocations
-        let capacity = (point_count + point_count / 4).max(64);
-        let ssbo_size = capacity as u64 * std::mem::size_of::<PointData>() as u64;
-
-        let ssbo = render_device.create_buffer(&BufferDescriptor {
-            label: Some("point_cloud_ssbo"),
-            size: ssbo_size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        render_queue.write_buffer(&ssbo, 0, point_bytes);
-
-        let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("point_cloud_params"),
-            contents: param_bytes,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
-        let bind_group = render_device.create_bind_group(
-            "point_cloud_bind_group",
-            &pipeline.material_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: ssbo.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        );
-
-        commands.entity(entity).insert(PointCloudGpuBuffers {
-            ssbo,
-            params_buffer,
-            bind_group,
-            instance_count: point_count,
-            ssbo_capacity: capacity,
-        });
     }
 }
 
@@ -381,7 +428,7 @@ type DrawPointCloud = (
     DrawPointCloudInstanced,
 );
 
-pub struct SetPointCloudBindGroup<const I: usize>;
+struct SetPointCloudBindGroup<const I: usize>;
 
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetPointCloudBindGroup<I> {
     type Param = ();
@@ -403,7 +450,7 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetPointCloudBindGroup<I
     }
 }
 
-pub struct DrawPointCloudInstanced;
+struct DrawPointCloudInstanced;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudInstanced {
     type Param = (
@@ -470,7 +517,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudInstanced {
     }
 }
 
-pub struct PointCloudRenderPlugin;
+pub(crate) struct PointCloudRenderPlugin;
 
 impl Plugin for PointCloudRenderPlugin {
     fn build(&self, app: &mut App) {
@@ -483,7 +530,10 @@ impl Plugin for PointCloudRenderPlugin {
         render_app
             .add_render_command::<Transparent3d, DrawPointCloud>()
             .init_resource::<SpecializedMeshPipelines<PointCloudPipeline>>()
-            .add_systems(ExtractSchedule, extract_point_clouds)
+            .add_systems(
+                ExtractSchedule,
+                (extract_point_cloud_data, extract_point_cloud_params),
+            )
             .add_systems(RenderStartup, init_pipeline)
             .add_systems(
                 Render,
@@ -492,5 +542,51 @@ impl Plugin for PointCloudRenderPlugin {
                     prepare_point_cloud_buffers.in_set(RenderSystems::PrepareResources),
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_params_default() {
+        let params = GpuPointCloudParams::default();
+        assert_eq!(params.size_attenuation, 0);
+        assert_eq!(params.opacity, 1.0);
+        assert_eq!(params.shape, 0);
+        // Identity matrix
+        let identity = Mat4::IDENTITY.to_cols_array();
+        assert_eq!(params.world_from_local, identity);
+    }
+
+    #[test]
+    fn gpu_params_from_default_settings() {
+        let transform = GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0));
+        let params = GpuPointCloudParams::from_settings_and_transform(None, &transform);
+        assert_eq!(params.size_attenuation, 0);
+        assert_eq!(params.opacity, 1.0);
+        assert_eq!(params.shape, 0);
+        assert_eq!(
+            params.world_from_local,
+            transform.to_matrix().to_cols_array()
+        );
+    }
+
+    #[test]
+    fn gpu_params_from_custom_settings() {
+        use crate::material::PointCloudShape;
+        let settings = PointCloudSettings {
+            blend: PointCloudBlend::Alpha,
+            size_attenuation: true,
+            opacity: 0.5,
+            shape: PointCloudShape::Square,
+        };
+        let transform = GlobalTransform::IDENTITY;
+        let params =
+            GpuPointCloudParams::from_settings_and_transform(Some(&settings), &transform);
+        assert_eq!(params.size_attenuation, 1);
+        assert_eq!(params.opacity, 0.5);
+        assert_eq!(params.shape, 1);
     }
 }
