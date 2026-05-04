@@ -22,11 +22,17 @@
 //!     .run();
 //! ```
 
+pub mod brush;
+pub mod grid;
+pub mod picking;
 pub mod splat;
 pub mod splat_material;
 pub(crate) mod render;
 mod systems;
 
+pub use brush::{cells_in_radius, linear_falloff, smoothstep_falloff};
+pub use grid::{GridSplat, GridSplat3d};
+pub use picking::{BrushPhase, GridBrush};
 pub use splat::{Splat, Splat3d, SplatPoint};
 pub use splat_material::{SplatBlend, SplatMaterial, SplatMaterial3d, SplatShape};
 
@@ -44,14 +50,29 @@ impl Plugin for SplatPlugin {
         bevy::asset::embedded_asset!(app, "splat.wgsl");
         app.init_asset::<Splat>()
             .init_asset::<SplatMaterial>()
+            .init_asset::<GridSplat>()
+            .add_message::<GridBrush>()
             .register_asset_reflect::<Splat>()
             .register_asset_reflect::<SplatMaterial>()
+            .register_asset_reflect::<GridSplat>()
             .register_type::<Splat3d>()
             .register_type::<SplatMaterial3d>()
             .register_type::<SplatBlend>()
             .register_type::<SplatShape>()
+            .register_type::<GridSplat3d>()
             .add_plugins(render::SplatRenderPlugin)
-            .add_systems(Update, systems::ensure_default_material)
-            .add_systems(PostUpdate, systems::update_splat_aabb);
+            .add_plugins(picking::GridPickingPlugin)
+            .add_systems(
+                Update,
+                (
+                    systems::ensure_default_material,
+                    grid::init_grid_backing,
+                    picking::attach_grid_pickers,
+                ),
+            )
+            .add_systems(
+                PostUpdate,
+                (systems::update_splat_aabb, grid::sync_grid_to_splat),
+            );
     }
 }
