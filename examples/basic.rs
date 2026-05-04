@@ -1,4 +1,4 @@
-//! Basic point cloud example — 10K random points in a sphere.
+//! Basic splat example — 10K points in a sphere with two materials.
 //!
 //! Run: cargo run --example basic
 
@@ -9,19 +9,19 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::NoIndirectDrawing;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_point_cloud::*;
+use bevy_splat::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "bevy_point_cloud — basic".into(),
+                title: "bevy_splat — basic".into(),
                 resolution: bevy::window::WindowResolution::new(1280, 720),
                 ..default()
             }),
             ..default()
         }))
-        .add_plugins(PointCloudPlugin)
+        .add_plugins(SplatPlugin)
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup)
@@ -29,13 +29,15 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    mut splats: ResMut<Assets<Splat>>,
+    mut materials: ResMut<Assets<SplatMaterial>>,
+) {
     let num_points = 10_000;
     let mut points = Vec::with_capacity(num_points);
 
-    // Generate points on a sphere surface with varied colors
     for i in 0..num_points {
-        // Fibonacci sphere distribution
         let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
         let theta = 2.0 * std::f32::consts::PI * (i as f32 / golden);
         let phi = (1.0 - 2.0 * (i as f32 + 0.5) / num_points as f32).acos();
@@ -45,24 +47,22 @@ fn setup(mut commands: Commands) {
         let y = radius * phi.sin() * theta.sin();
         let z = radius * phi.cos();
 
-        // Color: warm gradient based on position
         let r = 0.3 + 0.7 * ((x / radius + 1.0) * 0.5);
         let g = 0.2 + 0.6 * ((y / radius + 1.0) * 0.5);
         let b = 0.4 + 0.6 * ((z / radius + 1.0) * 0.5);
 
-        points.push(PointData::new(
+        points.push(SplatPoint::new(
             Vec3::new(x, y, z),
             3.0,
             Vec4::new(r, g, b, 0.8),
         ));
     }
 
-    // Additive blend (default) — size in pixels
-    commands.spawn(PointCloud::new(points.clone()));
+    // Additive blend (default material) — size in pixels.
+    commands.spawn(Splat3d(splats.add(Splat::new(points.clone()))));
 
-    // Alpha blend with size attenuation — size in world units
-    // Use fewer, smaller points so individual dots are clearly visible
-    let world_points: Vec<PointData> = (0..2_000)
+    // Alpha-blended sphere with size attenuation — size in world units.
+    let world_points: Vec<SplatPoint> = (0..2_000)
         .map(|i| {
             let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
             let theta = 2.0 * std::f32::consts::PI * (i as f32 / golden);
@@ -74,20 +74,19 @@ fn setup(mut commands: Commands) {
             let r = 0.3 + 0.7 * ((x / radius + 1.0) * 0.5);
             let g = 0.2 + 0.6 * ((y / radius + 1.0) * 0.5);
             let b = 0.4 + 0.6 * ((z / radius + 1.0) * 0.5);
-            PointData::new(Vec3::new(x, y, z), 0.15, Vec4::new(r, g, b, 0.9))
+            SplatPoint::new(Vec3::new(x, y, z), 0.15, Vec4::new(r, g, b, 0.9))
         })
         .collect();
     commands.spawn((
-        PointCloud::new(world_points),
-        PointCloudSettings {
-            blend: PointCloudBlend::Alpha,
+        Splat3d(splats.add(Splat::new(world_points))),
+        SplatMaterial3d(materials.add(SplatMaterial {
+            blend: SplatBlend::Alpha,
             size_attenuation: true,
             ..default()
-        },
+        })),
         Transform::from_xyz(12.0, 0.0, 0.0),
     ));
 
-    // Camera — NoIndirectDrawing is required for point cloud instancing
     commands.spawn((
         Camera3d::default(),
         Tonemapping::None,

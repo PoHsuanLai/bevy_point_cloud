@@ -1,4 +1,4 @@
-//! Live audio spectrum visualization — WAV file playback with FFT → 3D point cloud.
+//! Live audio spectrum visualization — WAV file playback with FFT → splats.
 //!
 //! Run: cargo run --example audio -- path/to/file.wav
 //!
@@ -17,7 +17,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::NoIndirectDrawing;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_point_cloud::*;
+use bevy_splat::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::{FftPlanner, num_complex::Complex};
 
@@ -25,18 +25,15 @@ const FFT_SIZE: usize = 2048;
 const SPECTRUM_BINS: usize = FFT_SIZE / 2;
 const HISTORY_ROWS: usize = 120;
 
-/// Shared ring buffer: audio thread writes samples, main thread reads for FFT.
 struct AudioRing {
     buffer: Vec<f32>,
     write_pos: usize,
     paused: bool,
 }
 
-/// Send+Sync wrapper around the shared ring buffer.
 #[derive(Resource, Clone)]
 struct SharedRing(Arc<Mutex<AudioRing>>);
 
-/// Holds the cpal stream (which is !Send). Inserted as NonSend resource.
 struct AudioStream(#[allow(dead_code)] cpal::Stream);
 
 #[derive(Resource)]
@@ -53,7 +50,6 @@ fn main() {
         std::process::exit(1);
     });
 
-    // Load WAV file
     let reader = hound::WavReader::open(&wav_path).unwrap_or_else(|e| {
         eprintln!("Failed to open {wav_path}: {e}");
         std::process::exit(1);
@@ -62,7 +58,6 @@ fn main() {
     let sample_rate = spec.sample_rate;
     let channels = spec.channels as usize;
 
-    // Decode all samples to mono f32
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Int => {
             let max_val = (1u32 << (spec.bits_per_sample - 1)) as f32;
@@ -91,14 +86,12 @@ fn main() {
         samples.len() as f32 / sample_rate as f32
     );
 
-    // Shared ring buffer
     let shared_ring = SharedRing(Arc::new(Mutex::new(AudioRing {
         buffer: vec![0.0; FFT_SIZE * 4],
         write_pos: 0,
         paused: false,
     })));
 
-    // Set up cpal output stream
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -148,7 +141,6 @@ fn main() {
 
     stream.play().expect("Failed to start audio stream");
 
-    // Hann window
     let window: Vec<f32> = (0..FFT_SIZE)
         .map(|i| {
             let t = i as f32 / (FFT_SIZE - 1) as f32;
@@ -159,13 +151,13 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "bevy_point_cloud — audio spectrum".into(),
+                title: "bevy_splat — audio spectrum".into(),
                 resolution: bevy::window::WindowResolution::new(1280, 720),
                 ..default()
             }),
             ..default()
         }))
-        .add_plugins(PointCloudPlugin)
+        .add_plugins(SplatPlugin)
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(shared_ring)
@@ -182,10 +174,15 @@ fn main() {
 }
 
 #[derive(Component)]
-struct SpectrumCloud;
+struct SpectrumCloud(Handle<Splat>);
 
-fn setup(mut commands: Commands) {
-    commands.spawn((SpectrumCloud, PointCloud::new(vec![])));
+fn setup(mut commands: Commands, mut splats: ResMut<Assets<Splat>>) {
+    // Pre-allocate enough capacity to hold the worst-case point count
+    // (every bin in every history row), so the GPU instance buffer doesn't
+    // get reallocated mid-animation.
+    let capacity = SPECTRUM_BINS * HISTORY_ROWS;
+    let handle = splats.add(Splat::with_capacity(vec![], capacity));
+    commands.spawn((SpectrumCloud(handle.clone()), Splat3d(handle)));
 
     commands.spawn((
         Camera3d::default(),
@@ -202,9 +199,9 @@ fn setup(mut commands: Commands) {
 fn update_spectrum(
     ring: Res<SharedRing>,
     mut spectrum: ResMut<SpectrumState>,
-    mut clouds: Query<&mut PointCloud, With<SpectrumCloud>>,
+    mut splats: ResMut<Assets<Splat>>,
+    clouds: Query<&SpectrumCloud>,
 ) {
-    // Read latest FFT_SIZE samples from ring buffer
     {
         let ring = ring.0.lock().unwrap();
         let buf_len = ring.buffer.len();
@@ -216,23 +213,22 @@ fn update_spectrum(
         }
     }
 
-    // FFT
     let fft = spectrum.planner.plan_fft_forward(FFT_SIZE);
     fft.process(&mut spectrum.fft_scratch);
 
-    // Magnitude spectrum (first half)
     let mut magnitudes = vec![0.0f32; SPECTRUM_BINS];
     for (i, mag) in magnitudes.iter_mut().enumerate() {
         let m = spectrum.fft_scratch[i].norm();
         *mag = (1.0 + m).ln().min(5.0) / 5.0;
     }
 
-    // Shift history and push new row
     spectrum.history.pop_front();
     spectrum.history.push_back(magnitudes);
 
-    // Rebuild point cloud
-    let Ok(mut cloud) = clouds.single_mut() else {
+    let Ok(cloud) = clouds.single() else {
+        return;
+    };
+    let Some(splat) = splats.get_mut(&cloud.0) else {
         return;
     };
 
@@ -240,7 +236,7 @@ fn update_spectrum(
     let depth = 15.0;
     let height_scale = 12.0;
 
-    cloud.points.clear();
+    splat.points.clear();
 
     for (row_idx, row) in spectrum.history.iter().enumerate() {
         let z = (row_idx as f32 / HISTORY_ROWS as f32 - 0.5) * depth;
@@ -251,7 +247,6 @@ fn update_spectrum(
                 continue;
             }
 
-            // Log-scale frequency axis
             let freq_frac = (bin_idx as f32 + 1.0).ln() / (SPECTRUM_BINS as f32).ln();
             let x = (freq_frac - 0.5) * width;
             let y = mag * height_scale;
@@ -260,7 +255,7 @@ fn update_spectrum(
             let age_alpha = 0.1 + 0.9 * row_age;
             let (r, g, b) = hsv_to_rgb(freq_frac * 0.7, 0.6, brightness);
 
-            cloud.points.push(PointData::new(
+            splat.points.push(SplatPoint::new(
                 Vec3::new(x, y, z),
                 1.2 + mag * 2.0,
                 Vec4::new(r, g, b, age_alpha * mag.sqrt()),

@@ -1,21 +1,19 @@
-//! Custom render pipeline for instanced point cloud drawing.
+//! Custom render pipeline for instanced splat drawing.
 //!
-//! Issues instanced draw calls: 1 quad mesh × N instances. The vertex shader
-//! uses `instance_index` to look up per-point data from the SSBO.
+//! Issues one indexed draw call per `Splat3d` entity: a shared 4-vertex /
+//! 6-index quad mesh, instanced N times. Per-point data lives in a per-
+//! instance vertex buffer (no SSBO). Visual settings come from a shared
+//! `SplatMaterial` asset (one uniform + bind group per material).
 
+use bevy::camera::visibility::RenderLayers;
+use bevy::mesh::VertexBufferLayout as MeshVertexBufferLayout;
 use bevy::{
     core_pipeline::core_3d::Transparent3d,
     ecs::system::{SystemParamItem, lifetimeless::*},
-    mesh::MeshVertexBufferLayoutRef,
-    pbr::{
-        MeshPipeline, MeshPipelineKey, RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup,
-        SetMeshViewBindingArrayBindGroup,
-    },
+    pbr::{MeshPipeline, MeshPipelineKey, SetMeshViewBindGroup},
     prelude::*,
     render::{
         Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
-        mesh::{RenderMesh, RenderMeshBufferInfo, allocator::MeshAllocator},
-        render_asset::RenderAssets,
         render_phase::{
             AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
@@ -27,144 +25,190 @@ use bevy::{
         view::ExtractedView,
     },
 };
-use bevy::camera::visibility::RenderLayers;
-use bytemuck::Pod;
+use bytemuck::{Pod, Zeroable};
 
-use crate::{
-    material::PointCloudBlend,
-    point_cloud::{PointCloud, PointCloudSettings, PointData},
-};
+use crate::splat::{Splat, Splat3d, SplatPoint};
+use crate::splat_material::{SplatBlend, SplatMaterial, SplatMaterial3d};
 
-/// Extracted point data — only inserted when `PointCloud` component changes.
-#[derive(Component, Clone)]
-struct ExtractedPointCloudData {
-    points: Vec<PointData>,
-    initial_capacity: u32,
-}
+// ---------------------------------------------------------------------------
+// Quad mesh (shared, render-world resource)
+// ---------------------------------------------------------------------------
 
-/// Extracted rendering params — inserted on any relevant change
-/// (transform, settings, or point data).
-#[derive(Component, Clone)]
-struct ExtractedPointCloudParams {
-    params: GpuPointCloudParams,
-    blend: PointCloudBlend,
-    render_layers: RenderLayers,
-}
-
-/// Layout: mat4x4 (64) + size_attenuation (4) + opacity (4) + shape (4) + pad (4) = 80 bytes.
+/// One CCW unit quad: 4 vertices, 6 indices. Shared across all splat draws.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, bytemuck::Zeroable)]
-pub(crate) struct GpuPointCloudParams {
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct QuadVertex {
+    offset: [f32; 2],
+    _pad: [f32; 2],
+}
+
+const QUAD_VERTICES: [QuadVertex; 4] = [
+    QuadVertex { offset: [-1.0, -1.0], _pad: [0.0; 2] },
+    QuadVertex { offset: [ 1.0, -1.0], _pad: [0.0; 2] },
+    QuadVertex { offset: [ 1.0,  1.0], _pad: [0.0; 2] },
+    QuadVertex { offset: [-1.0,  1.0], _pad: [0.0; 2] },
+];
+const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+#[derive(Resource)]
+struct SplatQuadMesh {
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    index_count: u32,
+}
+
+fn init_quad_mesh(mut commands: Commands, render_device: Res<RenderDevice>) {
+    let vertex_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("splat_quad_vertices"),
+        contents: bytemuck::cast_slice(&QUAD_VERTICES),
+        usage: BufferUsages::VERTEX,
+    });
+    let index_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("splat_quad_indices"),
+        contents: bytemuck::cast_slice(&QUAD_INDICES),
+        usage: BufferUsages::INDEX,
+    });
+    commands.insert_resource(SplatQuadMesh {
+        vertex_buffer,
+        index_buffer,
+        index_count: QUAD_INDICES.len() as u32,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// GPU material uniform
+// ---------------------------------------------------------------------------
+
+/// 80-byte uniform: world transform (64) + flags/values (16). Std140-safe.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct GpuSplatMaterial {
     world_from_local: [f32; 16],
     size_attenuation: u32,
     opacity: f32,
     shape: u32,
-    _pad: u32,
+    falloff_sharpness: f32,
 }
 
-impl Default for GpuPointCloudParams {
-    fn default() -> Self {
-        Self {
-            world_from_local: Mat4::IDENTITY.to_cols_array(),
-            size_attenuation: 0,
-            opacity: 1.0,
-            shape: 0,
-            _pad: 0,
-        }
-    }
-}
-
-impl GpuPointCloudParams {
-    fn from_settings_and_transform(
-        settings: Option<&PointCloudSettings>,
-        transform: &GlobalTransform,
-    ) -> Self {
-        let (size_attenuation, opacity, shape) = match settings {
-            Some(s) => (s.size_attenuation as u32, s.opacity, s.shape as u32),
-            None => (0, 1.0, 0),
-        };
+impl GpuSplatMaterial {
+    fn new(material: &SplatMaterial, transform: &GlobalTransform) -> Self {
         Self {
             world_from_local: transform.to_matrix().to_cols_array(),
-            size_attenuation,
-            opacity,
-            shape,
-            _pad: 0,
+            size_attenuation: material.size_attenuation as u32,
+            opacity: material.opacity,
+            shape: material.shape as u32,
+            falloff_sharpness: material.falloff_sharpness,
         }
     }
 }
 
-/// Extract point data only when the `PointCloud` component changes.
-fn extract_point_cloud_data(
+// ---------------------------------------------------------------------------
+// Extracted components (live in the render world)
+// ---------------------------------------------------------------------------
+
+#[derive(Component, Clone)]
+struct ExtractedSplatInstances {
+    points: Vec<SplatPoint>,
+    initial_capacity: u32,
+}
+
+#[derive(Component, Clone)]
+struct ExtractedSplatParams {
+    uniform: GpuSplatMaterial,
+    blend: SplatBlend,
+    render_layers: RenderLayers,
+}
+
+#[allow(clippy::type_complexity)]
+fn extract_splat_instances(
     mut commands: Commands,
-    changed: Extract<Query<(RenderEntity, &PointCloud), Changed<PointCloud>>>,
+    splats: Extract<Res<Assets<Splat>>>,
+    mut events: Extract<MessageReader<AssetEvent<Splat>>>,
+    mut dirty: Local<bevy::platform::collections::HashSet<AssetId<Splat>>>,
+    query: Extract<Query<(RenderEntity, &Splat3d)>>,
 ) {
-    for (render_entity, cloud) in &changed {
-        if cloud.points.is_empty() {
+    for event in events.read() {
+        match event {
+            AssetEvent::Added { id }
+            | AssetEvent::Modified { id }
+            | AssetEvent::LoadedWithDependencies { id } => {
+                dirty.insert(*id);
+            }
+            AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
+                dirty.remove(id);
+            }
+        }
+    }
+    if dirty.is_empty() {
+        return;
+    }
+
+    for (render_entity, splat3d) in &query {
+        let id = splat3d.0.id();
+        if !dirty.contains(&id) {
+            continue;
+        }
+        let Some(splat) = splats.get(id) else {
+            continue;
+        };
+        if splat.points.is_empty() {
             commands
                 .entity(render_entity)
-                .remove::<ExtractedPointCloudData>();
+                .remove::<ExtractedSplatInstances>();
             continue;
         }
         commands
             .entity(render_entity)
-            .insert(ExtractedPointCloudData {
-                points: cloud.points.clone(),
-                initial_capacity: cloud.capacity as u32,
+            .insert(ExtractedSplatInstances {
+                points: splat.points.clone(),
+                initial_capacity: splat.capacity as u32,
             });
     }
+
+    dirty.clear();
 }
 
-/// Extract rendering params on any relevant change (transform, settings, points, mesh).
 #[allow(clippy::type_complexity)]
-fn extract_point_cloud_params(
+fn extract_splat_params(
     mut commands: Commands,
-    changed: Extract<
-        Query<
-            (
-                RenderEntity,
-                &PointCloud,
-                Option<&PointCloudSettings>,
-                &GlobalTransform,
-                Option<&RenderLayers>,
-            ),
-            Or<(
-                Changed<PointCloud>,
-                Changed<PointCloudSettings>,
-                Changed<GlobalTransform>,
-                Added<Mesh3d>,
-            )>,
-        >,
+    materials: Extract<Res<Assets<SplatMaterial>>>,
+    query: Extract<
+        Query<(
+            RenderEntity,
+            &Splat3d,
+            &SplatMaterial3d,
+            &GlobalTransform,
+            Option<&RenderLayers>,
+        )>,
     >,
 ) {
-    for (render_entity, cloud, settings, transform, render_layers) in &changed {
-        if cloud.points.is_empty() {
-            commands
-                .entity(render_entity)
-                .remove::<ExtractedPointCloudParams>();
+    for (render_entity, _splat3d, material3d, transform, render_layers) in &query {
+        let Some(material) = materials.get(&material3d.0) else {
             continue;
-        }
-        commands
-            .entity(render_entity)
-            .insert(ExtractedPointCloudParams {
-                params: GpuPointCloudParams::from_settings_and_transform(settings, transform),
-                blend: settings.map(|s| s.blend).unwrap_or_default(),
-                render_layers: render_layers.cloned().unwrap_or_default(),
-            });
+        };
+        commands.entity(render_entity).insert(ExtractedSplatParams {
+            uniform: GpuSplatMaterial::new(material, transform),
+            blend: material.blend,
+            render_layers: render_layers.cloned().unwrap_or_default(),
+        });
     }
 }
 
+// ---------------------------------------------------------------------------
+// GPU-side per-entity buffers
+// ---------------------------------------------------------------------------
+
 #[derive(Component)]
-pub(crate) struct PointCloudGpuBuffers {
-    ssbo: Buffer,
+pub(crate) struct SplatGpuBuffers {
+    instance_buffer: Buffer,
     params_buffer: Buffer,
     bind_group: BindGroup,
     instance_count: u32,
-    /// Only reallocate SSBO when point count exceeds this.
-    ssbo_capacity: u32,
+    capacity: u32,
 }
 
 #[derive(Resource)]
-struct PointCloudPipeline {
+struct SplatPipeline {
     shader: Handle<Shader>,
     mesh_pipeline: MeshPipeline,
     material_layout: BindGroupLayout,
@@ -177,64 +221,74 @@ fn init_pipeline(
     render_device: Res<RenderDevice>,
 ) {
     let material_layout = render_device.create_bind_group_layout(
-        "point_cloud_material_layout",
-        &[
-            BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
+        "splat_material_layout",
+        &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::VERTEX_FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
-            BindGroupLayoutEntry {
-                binding: 1,
-                visibility: ShaderStages::VERTEX_FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
+            count: None,
+        }],
     );
 
     let shader: Handle<Shader> =
-        bevy::asset::load_embedded_asset!(asset_server.as_ref(), "point_cloud.wgsl");
+        bevy::asset::load_embedded_asset!(asset_server.as_ref(), "splat.wgsl");
 
-    commands.insert_resource(PointCloudPipeline {
+    commands.insert_resource(SplatPipeline {
         shader,
         mesh_pipeline: mesh_pipeline.clone(),
         material_layout,
     });
 }
 
-impl SpecializedMeshPipeline for PointCloudPipeline {
+// ---------------------------------------------------------------------------
+// Pipeline specialization
+// ---------------------------------------------------------------------------
+
+impl SpecializedRenderPipeline for SplatPipeline {
     type Key = MeshPipelineKey;
 
-    fn specialize(
-        &self,
-        key: Self::Key,
-        layout: &MeshVertexBufferLayoutRef,
-    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
-        let mut descriptor = self.mesh_pipeline.specialize(key, layout)?;
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let format = if key.contains(MeshPipelineKey::HDR) {
+            bevy::render::view::ViewTarget::TEXTURE_FORMAT_HDR
+        } else {
+            TextureFormat::bevy_default()
+        };
+        let sample_count = key.msaa_samples();
 
-        descriptor.vertex.shader = self.shader.clone();
-        if let Some(ref mut fragment) = descriptor.fragment {
-            fragment.shader = self.shader.clone();
-        }
-
-        descriptor.primitive.cull_mode = None;
+        let quad_layout = MeshVertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as u64,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                format: VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            }],
+        };
+        let instance_layout = MeshVertexBufferLayout {
+            array_stride: std::mem::size_of::<SplatPoint>() as u64,
+            step_mode: VertexStepMode::Instance,
+            attributes: vec![
+                VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 1,
+                },
+                VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 2,
+                },
+            ],
+        };
 
         let blend_bits = key.intersection(MeshPipelineKey::BLEND_RESERVED_BITS);
-        if blend_bits == MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA {
-            if let Some(ref mut fragment) = descriptor.fragment
-                && let Some(target) = fragment.targets.first_mut().and_then(|t| t.as_mut())
-            {
-                target.blend = Some(BlendState {
+        let (blend, depth_write) = if blend_bits == MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA {
+            (
+                Some(BlendState {
                     color: BlendComponent {
                         src_factor: BlendFactor::SrcAlpha,
                         dst_factor: BlendFactor::One,
@@ -245,48 +299,79 @@ impl SpecializedMeshPipeline for PointCloudPipeline {
                         dst_factor: BlendFactor::One,
                         operation: BlendOperation::Add,
                     },
-                });
-            }
-            if let Some(ref mut depth) = descriptor.depth_stencil {
-                depth.depth_write_enabled = false;
-            }
+                }),
+                false,
+            )
         } else if blend_bits == MeshPipelineKey::BLEND_ALPHA {
-            if let Some(ref mut fragment) = descriptor.fragment
-                && let Some(target) = fragment.targets.first_mut().and_then(|t| t.as_mut())
-            {
-                target.blend = Some(BlendState::ALPHA_BLENDING);
-            }
-            if let Some(ref mut depth) = descriptor.depth_stencil {
-                depth.depth_write_enabled = false;
-            }
-        } else if let Some(ref mut depth) = descriptor.depth_stencil {
-            depth.depth_write_enabled = true;
+            (Some(BlendState::ALPHA_BLENDING), false)
+        } else {
+            (None, true)
+        };
+
+        RenderPipelineDescriptor {
+            label: Some("splat_pipeline".into()),
+            layout: vec![
+                self.mesh_pipeline.get_view_layout(key.into()).main_layout.clone(),
+                self.material_layout.clone(),
+            ],
+            push_constant_ranges: vec![],
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("vertex".into()),
+                buffers: vec![quad_layout, instance_layout],
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: depth_write,
+                depth_compare: CompareFunction::GreaterEqual,
+                stencil: StencilState::default(),
+                bias: DepthBiasState::default(),
+            }),
+            multisample: MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("fragment".into()),
+                targets: vec![Some(ColorTargetState {
+                    format,
+                    blend,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            zero_initialize_workgroup_memory: false,
         }
-
-        descriptor.layout.push(self.material_layout.clone());
-
-        Ok(descriptor)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Queue
+// ---------------------------------------------------------------------------
+
 #[allow(clippy::too_many_arguments)]
-fn queue_point_clouds(
+fn queue_splats(
     transparent_draw_functions: Res<DrawFunctions<Transparent3d>>,
-    pipeline: Res<PointCloudPipeline>,
-    mut pipelines: ResMut<SpecializedMeshPipelines<PointCloudPipeline>>,
+    pipeline: Res<SplatPipeline>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<SplatPipeline>>,
     pipeline_cache: Res<PipelineCache>,
-    meshes: Res<RenderAssets<RenderMesh>>,
-    render_mesh_instances: Res<RenderMeshInstances>,
-    point_clouds: Query<(
-        Entity,
-        &MainEntity,
-        &ExtractedPointCloudParams,
-        &PointCloudGpuBuffers,
-    )>,
+    splats: Query<(Entity, &MainEntity, &ExtractedSplatParams, &SplatGpuBuffers)>,
     mut transparent_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<(&ExtractedView, &Msaa, Option<&RenderLayers>)>,
 ) {
-    let draw_fn = transparent_draw_functions.read().id::<DrawPointCloud>();
+    let draw_fn = transparent_draw_functions.read().id::<DrawSplat>();
 
     for (view, msaa, view_layers) in &views {
         let view_mask = view_layers.cloned().unwrap_or_default();
@@ -294,42 +379,33 @@ fn queue_point_clouds(
             continue;
         };
 
-        let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
-        let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
+        let view_key = MeshPipelineKey::from_msaa_samples(msaa.samples())
+            | MeshPipelineKey::from_hdr(view.hdr);
         let rangefinder = view.rangefinder3d();
 
-        for (entity, main_entity, extracted, _gpu_buffers) in &point_clouds {
+        for (entity, main_entity, extracted, _gpu) in &splats {
             if !view_mask.intersects(&extracted.render_layers) {
                 continue;
             }
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*main_entity)
-            else {
-                continue;
-            };
-            let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
-                continue;
-            };
 
             let blend_key = match extracted.blend {
-                PointCloudBlend::Additive => MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA,
-                PointCloudBlend::Alpha => MeshPipelineKey::BLEND_ALPHA,
-                PointCloudBlend::Opaque => MeshPipelineKey::NONE,
+                SplatBlend::Additive => MeshPipelineKey::BLEND_PREMULTIPLIED_ALPHA,
+                SplatBlend::Alpha => MeshPipelineKey::BLEND_ALPHA,
+                SplatBlend::Opaque => MeshPipelineKey::NONE,
             };
+            let key = view_key | blend_key;
+            let pipeline_id = pipelines.specialize(&pipeline_cache, &pipeline, key);
 
-            let key = view_key
-                | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology())
-                | blend_key;
-            let Ok(pipeline_id) =
-                pipelines.specialize(&pipeline_cache, &pipeline, key, &mesh.layout)
-            else {
-                continue;
-            };
-
+            let translation = Vec3::new(
+                extracted.uniform.world_from_local[12],
+                extracted.uniform.world_from_local[13],
+                extracted.uniform.world_from_local[14],
+            );
             phase.add(Transparent3d {
                 entity: (entity, *main_entity),
                 pipeline: pipeline_id,
                 draw_function: draw_fn,
-                distance: rangefinder.distance_translation(&mesh_instance.translation),
+                distance: rangefinder.distance_translation(&translation),
                 batch_range: 0..1,
                 extra_index: PhaseItemExtraIndex::None,
                 indexed: true,
@@ -338,208 +414,165 @@ fn queue_point_clouds(
     }
 }
 
-fn prepare_point_cloud_buffers(
+// ---------------------------------------------------------------------------
+// Prepare GPU buffers
+// ---------------------------------------------------------------------------
+
+fn prepare_splat_buffers(
     mut commands: Commands,
     mut query: Query<(
         Entity,
-        Option<&ExtractedPointCloudData>,
-        &ExtractedPointCloudParams,
-        Option<&mut PointCloudGpuBuffers>,
+        Option<&ExtractedSplatInstances>,
+        &ExtractedSplatParams,
+        Option<&mut SplatGpuBuffers>,
     )>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    pipeline: Res<PointCloudPipeline>,
+    pipeline: Res<SplatPipeline>,
 ) {
-    for (entity, data, params, existing) in &mut query {
-        let param_bytes: &[u8] = bytemuck::bytes_of(&params.params);
+    for (entity, instances, params, existing) in &mut query {
+        let param_bytes: &[u8] = bytemuck::bytes_of(&params.uniform);
 
-        if let Some(data) = data {
-            let point_bytes: &[u8] = bytemuck::cast_slice(&data.points);
-            let point_count = data.points.len() as u32;
+        if let Some(instances) = instances {
+            let point_bytes: &[u8] = bytemuck::cast_slice(&instances.points);
+            let point_count = instances.points.len() as u32;
 
             if let Some(mut buffers) = existing
-                && point_count <= buffers.ssbo_capacity
+                && point_count <= buffers.capacity
             {
-                // Reuse existing SSBO — mutate in place to avoid change-detection churn.
-                render_queue.write_buffer(&buffers.ssbo, 0, point_bytes);
+                render_queue.write_buffer(&buffers.instance_buffer, 0, point_bytes);
                 render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
                 buffers.instance_count = point_count;
             } else {
-                // Allocate new SSBO, respecting user-specified capacity hint.
-                let capacity = point_count.max(data.initial_capacity).max(64);
-                let capacity = capacity + capacity / 4; // 25% headroom
-                let ssbo_size = capacity as u64 * std::mem::size_of::<PointData>() as u64;
+                let capacity = point_count.max(instances.initial_capacity).max(64);
+                let capacity = capacity + capacity / 4;
+                let buffer_size = capacity as u64 * std::mem::size_of::<SplatPoint>() as u64;
 
-                let ssbo = render_device.create_buffer(&BufferDescriptor {
-                    label: Some("point_cloud_ssbo"),
-                    size: ssbo_size,
-                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                let instance_buffer = render_device.create_buffer(&BufferDescriptor {
+                    label: Some("splat_instance_buffer"),
+                    size: buffer_size,
+                    usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                render_queue.write_buffer(&ssbo, 0, point_bytes);
+                render_queue.write_buffer(&instance_buffer, 0, point_bytes);
 
                 let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some("point_cloud_params"),
+                    label: Some("splat_params_uniform"),
                     contents: param_bytes,
                     usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                 });
 
                 let bind_group = render_device.create_bind_group(
-                    "point_cloud_bind_group",
+                    "splat_material_bind_group",
                     &pipeline.material_layout,
-                    &[
-                        BindGroupEntry {
-                            binding: 0,
-                            resource: ssbo.as_entire_binding(),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
-                            resource: params_buffer.as_entire_binding(),
-                        },
-                    ],
+                    &[BindGroupEntry {
+                        binding: 0,
+                        resource: params_buffer.as_entire_binding(),
+                    }],
                 );
 
-                commands.entity(entity).insert(PointCloudGpuBuffers {
-                    ssbo,
+                commands.entity(entity).insert(SplatGpuBuffers {
+                    instance_buffer,
                     params_buffer,
                     bind_group,
                     instance_count: point_count,
-                    ssbo_capacity: capacity,
+                    capacity,
                 });
             }
 
-            // Remove extracted data so it's not re-uploaded next frame.
-            commands
-                .entity(entity)
-                .remove::<ExtractedPointCloudData>();
+            commands.entity(entity).remove::<ExtractedSplatInstances>();
         } else if let Some(buffers) = existing {
-            // No new point data — only update the params uniform (80 bytes).
             render_queue.write_buffer(&buffers.params_buffer, 0, param_bytes);
         }
     }
 }
 
-type DrawPointCloud = (
+// ---------------------------------------------------------------------------
+// Draw command
+// ---------------------------------------------------------------------------
+
+type DrawSplat = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
-    SetMeshViewBindingArrayBindGroup<1>,
-    SetMeshBindGroup<2>,
-    SetPointCloudBindGroup<3>,
-    DrawPointCloudInstanced,
+    SetSplatBindGroup<1>,
+    DrawSplatInstanced,
 );
 
-struct SetPointCloudBindGroup<const I: usize>;
+struct SetSplatBindGroup<const I: usize>;
 
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetPointCloudBindGroup<I> {
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetSplatBindGroup<I> {
     type Param = ();
     type ViewQuery = ();
-    type ItemQuery = Read<PointCloudGpuBuffers>;
+    type ItemQuery = Read<SplatGpuBuffers>;
 
     fn render<'w>(
         _item: &P,
         _view: (),
-        gpu_buffers: Option<&'w PointCloudGpuBuffers>,
+        gpu: Option<&'w SplatGpuBuffers>,
         _param: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(gpu_buffers) = gpu_buffers else {
+        let Some(gpu) = gpu else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(I, &gpu_buffers.bind_group, &[]);
+        pass.set_bind_group(I, &gpu.bind_group, &[]);
         RenderCommandResult::Success
     }
 }
 
-struct DrawPointCloudInstanced;
+struct DrawSplatInstanced;
 
-impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudInstanced {
-    type Param = (
-        SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
-        SRes<MeshAllocator>,
-    );
+impl<P: PhaseItem> RenderCommand<P> for DrawSplatInstanced {
+    type Param = SRes<SplatQuadMesh>;
     type ViewQuery = ();
-    type ItemQuery = Read<PointCloudGpuBuffers>;
+    type ItemQuery = Read<SplatGpuBuffers>;
 
     fn render<'w>(
-        item: &P,
+        _item: &P,
         _view: (),
-        gpu_buffers: Option<&'w PointCloudGpuBuffers>,
-        (meshes, render_mesh_instances, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        gpu: Option<&'w SplatGpuBuffers>,
+        quad: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let mesh_allocator = mesh_allocator.into_inner();
-
-        let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(item.main_entity())
-        else {
+        let Some(gpu) = gpu else {
             return RenderCommandResult::Skip;
         };
-        let Some(gpu_mesh) = meshes.into_inner().get(mesh_instance.mesh_asset_id) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(gpu_buffers) = gpu_buffers else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(vertex_buffer_slice) =
-            mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id)
-        else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_vertex_buffer(0, vertex_buffer_slice.buffer.slice(..));
-
-        match &gpu_mesh.buffer_info {
-            RenderMeshBufferInfo::Indexed {
-                index_format,
-                count,
-            } => {
-                let Some(index_buffer_slice) =
-                    mesh_allocator.mesh_index_slice(&mesh_instance.mesh_asset_id)
-                else {
-                    return RenderCommandResult::Skip;
-                };
-
-                pass.set_index_buffer(index_buffer_slice.buffer.slice(..), 0, *index_format);
-                pass.draw_indexed(
-                    index_buffer_slice.range.start..(index_buffer_slice.range.start + count),
-                    vertex_buffer_slice.range.start as i32,
-                    0..gpu_buffers.instance_count,
-                );
-            }
-            RenderMeshBufferInfo::NonIndexed => {
-                pass.draw(
-                    vertex_buffer_slice.range.clone(),
-                    0..gpu_buffers.instance_count,
-                );
-            }
-        }
+        let quad = quad.into_inner();
+        pass.set_vertex_buffer(0, quad.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, gpu.instance_buffer.slice(..));
+        pass.set_index_buffer(quad.index_buffer.slice(..), 0, IndexFormat::Uint32);
+        pass.draw_indexed(0..quad.index_count, 0, 0..gpu.instance_count);
         RenderCommandResult::Success
     }
 }
 
-pub(crate) struct PointCloudRenderPlugin;
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
 
-impl Plugin for PointCloudRenderPlugin {
+pub(crate) struct SplatRenderPlugin;
+
+impl Plugin for SplatRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SyncComponentPlugin::<PointCloud>::default());
+        app.add_plugins(SyncComponentPlugin::<Splat3d>::default());
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
         render_app
-            .add_render_command::<Transparent3d, DrawPointCloud>()
-            .init_resource::<SpecializedMeshPipelines<PointCloudPipeline>>()
+            .add_render_command::<Transparent3d, DrawSplat>()
+            .init_resource::<SpecializedRenderPipelines<SplatPipeline>>()
             .add_systems(
                 ExtractSchedule,
-                (extract_point_cloud_data, extract_point_cloud_params),
+                (extract_splat_instances, extract_splat_params),
             )
-            .add_systems(RenderStartup, init_pipeline)
+            .add_systems(RenderStartup, (init_pipeline, init_quad_mesh))
             .add_systems(
                 Render,
                 (
-                    queue_point_clouds.in_set(RenderSystems::QueueMeshes),
-                    prepare_point_cloud_buffers.in_set(RenderSystems::PrepareResources),
+                    queue_splats.in_set(RenderSystems::QueueMeshes),
+                    prepare_splat_buffers.in_set(RenderSystems::PrepareResources),
                 ),
             );
     }
@@ -550,43 +583,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gpu_params_default() {
-        let params = GpuPointCloudParams::default();
-        assert_eq!(params.size_attenuation, 0);
-        assert_eq!(params.opacity, 1.0);
-        assert_eq!(params.shape, 0);
-        // Identity matrix
-        let identity = Mat4::IDENTITY.to_cols_array();
-        assert_eq!(params.world_from_local, identity);
+    fn gpu_material_packs_to_80_bytes() {
+        assert_eq!(std::mem::size_of::<GpuSplatMaterial>(), 80);
     }
 
     #[test]
-    fn gpu_params_from_default_settings() {
-        let transform = GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0));
-        let params = GpuPointCloudParams::from_settings_and_transform(None, &transform);
-        assert_eq!(params.size_attenuation, 0);
-        assert_eq!(params.opacity, 1.0);
-        assert_eq!(params.shape, 0);
-        assert_eq!(
-            params.world_from_local,
-            transform.to_matrix().to_cols_array()
-        );
+    fn gpu_material_from_default() {
+        let m = SplatMaterial::default();
+        let t = GlobalTransform::IDENTITY;
+        let gpu = GpuSplatMaterial::new(&m, &t);
+        assert_eq!(gpu.size_attenuation, 0);
+        assert_eq!(gpu.opacity, 1.0);
+        assert_eq!(gpu.shape, 0);
+        assert_eq!(gpu.falloff_sharpness, 4.0);
     }
 
     #[test]
-    fn gpu_params_from_custom_settings() {
-        use crate::material::PointCloudShape;
-        let settings = PointCloudSettings {
-            blend: PointCloudBlend::Alpha,
-            size_attenuation: true,
-            opacity: 0.5,
-            shape: PointCloudShape::Square,
-        };
-        let transform = GlobalTransform::IDENTITY;
-        let params =
-            GpuPointCloudParams::from_settings_and_transform(Some(&settings), &transform);
-        assert_eq!(params.size_attenuation, 1);
-        assert_eq!(params.opacity, 0.5);
-        assert_eq!(params.shape, 1);
+    fn gpu_material_carries_translation() {
+        let t = GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0));
+        let gpu = GpuSplatMaterial::new(&SplatMaterial::default(), &t);
+        assert_eq!(gpu.world_from_local[12], 1.0);
+        assert_eq!(gpu.world_from_local[13], 2.0);
+        assert_eq!(gpu.world_from_local[14], 3.0);
+    }
+
+    #[test]
+    fn quad_geometry_is_two_triangles() {
+        assert_eq!(QUAD_VERTICES.len(), 4);
+        assert_eq!(QUAD_INDICES.len(), 6);
     }
 }

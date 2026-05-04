@@ -16,20 +16,20 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::NoIndirectDrawing;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_point_cloud::*;
+use bevy_splat::*;
 use common::{hash, hash2};
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "bevy_point_cloud — dashboard".into(),
+                title: "bevy_splat — dashboard".into(),
                 resolution: bevy::window::WindowResolution::new(1280, 900),
                 ..default()
             }),
             ..default()
         }))
-        .add_plugins(PointCloudPlugin)
+        .add_plugins(SplatPlugin)
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup)
@@ -111,7 +111,7 @@ fn make_grid(
     v_lines: usize,
     density: usize,
     brightness: f32,
-) -> Vec<PointData> {
+) -> Vec<SplatPoint> {
     let mut pts = Vec::new();
     let alpha = brightness * 0.8;
 
@@ -120,7 +120,7 @@ fn make_grid(
         let y = y0 + height * i as f32 / h_lines as f32;
         for j in 0..density {
             let x = x0 + width * j as f32 / (density - 1) as f32;
-            pts.push(PointData::new(
+            pts.push(SplatPoint::new(
                 Vec3::new(x, y, 0.0),
                 0.8,
                 Vec4::new(brightness, brightness, brightness, alpha),
@@ -133,7 +133,7 @@ fn make_grid(
         let x = x0 + width * i as f32 / v_lines as f32;
         for j in 0..density {
             let y = y0 + height * j as f32 / (density - 1) as f32;
-            pts.push(PointData::new(
+            pts.push(SplatPoint::new(
                 Vec3::new(x, y, 0.0),
                 0.8,
                 Vec4::new(brightness, brightness, brightness, alpha),
@@ -154,7 +154,7 @@ fn make_waveform(
     f: impl Fn(f32) -> f32,
     brightness: f32,
     point_size: f32,
-) -> Vec<PointData> {
+) -> Vec<SplatPoint> {
     let mut pts = Vec::with_capacity(samples);
     let mid_y = y0 + height * 0.5;
 
@@ -165,7 +165,7 @@ fn make_waveform(
         let y = mid_y + val * height * 0.5;
 
         let b = brightness * (0.6 + 0.4 * val.abs().min(1.0));
-        pts.push(PointData::new(
+        pts.push(SplatPoint::new(
             Vec3::new(x, y, 0.0),
             point_size,
             Vec4::new(b, b, b * 1.05, brightness),
@@ -182,7 +182,7 @@ fn make_bar_chart(
     num_bars: usize,
     density_per_bar: usize,
     seed: f32,
-) -> Vec<PointData> {
+) -> Vec<SplatPoint> {
     let mut pts = Vec::new();
     let bar_width = width / (num_bars as f32 * 1.5);
     let gap = bar_width * 0.5;
@@ -198,7 +198,7 @@ fn make_bar_chart(
 
             let h_ratio = frac;
             let brightness = 0.3 + 0.7 * h_ratio;
-            pts.push(PointData::new(
+            pts.push(SplatPoint::new(
                 Vec3::new(x, y, 0.0),
                 1.0,
                 Vec4::new(brightness, brightness, brightness, 0.9),
@@ -215,7 +215,7 @@ fn make_scatter(
     height: f32,
     count: usize,
     seed: f32,
-) -> Vec<PointData> {
+) -> Vec<SplatPoint> {
     let mut pts = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -227,7 +227,7 @@ fn make_scatter(
         let y = y0 + (curve + (ry - 0.5) * 0.4 + 0.5).clamp(0.0, 1.0) * height;
 
         let brightness = 0.3 + 0.5 * hash(i as f32, seed * 3.0);
-        pts.push(PointData::new(
+        pts.push(SplatPoint::new(
             Vec3::new(x, y, 0.0),
             1.2,
             Vec4::new(brightness, brightness * 1.1, brightness, 0.7),
@@ -236,7 +236,7 @@ fn make_scatter(
     pts
 }
 
-fn make_terrain_3d() -> Vec<PointData> {
+fn make_terrain_3d() -> Vec<SplatPoint> {
     let terrain_height_scale = 10.0;
     let terrain_width = 24.0;
     let terrain_depth = 3.5;
@@ -276,7 +276,7 @@ fn make_terrain_3d() -> Vec<PointData> {
                 brightness
             };
 
-            points.push(PointData::new(
+            points.push(SplatPoint::new(
                 Vec3::new(x, y, z),
                 1.2,
                 Vec4::new(brightness, brightness, brightness * 1.02, alpha),
@@ -318,7 +318,7 @@ fn make_terrain_3d() -> Vec<PointData> {
         let h_ratio = (h / terrain_height_scale).min(1.0);
         let brightness = h_ratio.powf(0.5) * 0.7 + 0.1;
 
-        points.push(PointData::new(
+        points.push(SplatPoint::new(
             Vec3::new(x, y, z),
             0.9,
             Vec4::new(brightness, brightness, brightness * 1.03, brightness * 0.85),
@@ -345,7 +345,7 @@ fn make_terrain_3d() -> Vec<PointData> {
         let y = y_offset + r3 * base_h.max(0.5) * 0.6;
 
         let brightness = 0.08 + r3 * 0.2;
-        points.push(PointData::new(
+        points.push(SplatPoint::new(
             Vec3::new(x, y, z),
             0.7,
             Vec4::new(brightness, brightness, brightness, brightness * 0.6),
@@ -355,21 +355,21 @@ fn make_terrain_3d() -> Vec<PointData> {
     points
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut splats: ResMut<Assets<Splat>>) {
     // Layout constants (world units, Z=0 plane for 2D elements)
     let panel_w = 24.0;
     let left = -12.0;
 
     // ── 3D Terrain (top, Y=10..22) ──
     let terrain = make_terrain_3d();
-    commands.spawn(PointCloud::new(terrain));
+    commands.spawn(Splat3d(splats.add(Splat::new(terrain))));
 
     // ── Panel 1: Waveform A with grid (Y=5..9) ──
     let mut panel1 = make_grid(left, 5.0, panel_w, 4.0, 4, 12, 300, 0.15);
     panel1.extend(make_waveform(
         left, 5.0, panel_w, 4.0, 2000, waveform_a, 0.9, 1.3,
     ));
-    commands.spawn(PointCloud::new(panel1));
+    commands.spawn(Splat3d(splats.add(Splat::new(panel1))));
 
     // ── Panel 2: Two overlaid waveforms (Y=0..4) ──
     let mut panel2 = make_grid(left, 0.0, panel_w, 4.0, 4, 12, 300, 0.12);
@@ -379,7 +379,7 @@ fn setup(mut commands: Commands) {
     panel2.extend(make_waveform(
         left, 0.0, panel_w, 4.0, 2000, waveform_c, 0.5, 1.0,
     ));
-    commands.spawn(PointCloud::new(panel2));
+    commands.spawn(Splat3d(splats.add(Splat::new(panel2))));
 
     // ── Panel 3: Bar chart + scatter (Y=-6..-1) ──
     // Left half: bar chart
@@ -387,7 +387,7 @@ fn setup(mut commands: Commands) {
     panel3.extend(make_bar_chart(left + 0.5, -6.0, 10.0, 4.5, 24, 80, 1.0));
     // Right half: scatter plot
     panel3.extend(make_scatter(left + 13.0, -6.0, 10.0, 5.0, 3000, 2.0));
-    commands.spawn(PointCloud::new(panel3));
+    commands.spawn(Splat3d(splats.add(Splat::new(panel3))));
 
     // ── Panel 4: Dense waveform strip (Y=-8..-7) ──
     let mut panel4 = Vec::new();
@@ -403,28 +403,28 @@ fn setup(mut commands: Commands) {
                 * (1.0 - (x_frac - 0.5).abs() * 1.8).max(0.0);
             let y = y_base + val;
             let brightness = 0.3 + 0.5 * hash(i as f32 + seed, seed);
-            panel4.push(PointData::new(
+            panel4.push(SplatPoint::new(
                 Vec3::new(x, y, 0.0),
                 0.9,
                 Vec4::new(brightness, brightness, brightness, 0.7),
             ));
         }
     }
-    commands.spawn(PointCloud::new(panel4));
+    commands.spawn(Splat3d(splats.add(Splat::new(panel4))));
 
     // ── Horizontal separator lines ──
     let mut separators = Vec::new();
     for &y in &[9.5, 4.5, -0.5, -6.5] {
         for i in 0..600 {
             let x = left + panel_w * i as f32 / 599.0;
-            separators.push(PointData::new(
+            separators.push(SplatPoint::new(
                 Vec3::new(x, y, 0.0),
                 0.6,
                 Vec4::new(0.25, 0.25, 0.25, 0.5),
             ));
         }
     }
-    commands.spawn(PointCloud::new(separators));
+    commands.spawn(Splat3d(splats.add(Splat::new(separators))));
 
     let total = 200_000 // terrain approx
         + 2000 + 300 * 17 // panel1

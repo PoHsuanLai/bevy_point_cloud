@@ -9,20 +9,20 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::NoIndirectDrawing;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_point_cloud::*;
+use bevy_splat::*;
 use common::{hash, hash2};
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "bevy_point_cloud — terrain".into(),
+                title: "bevy_splat — terrain".into(),
                 resolution: bevy::window::WindowResolution::new(1280, 720),
                 ..default()
             }),
             ..default()
         }))
-        .add_plugins(PointCloudPlugin)
+        .add_plugins(SplatPlugin)
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup)
@@ -63,7 +63,7 @@ fn terrain_height(x_frac: f32) -> f32 {
     (central + secondary + tertiary) * ridges * envelope
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut splats: ResMut<Assets<Splat>>) {
     let terrain_height_scale = 14.0;
     let terrain_width = 26.0;
     let terrain_depth = 4.0;
@@ -97,7 +97,7 @@ fn setup(mut commands: Commands) {
             let h_ratio = (y / terrain_height_scale).min(1.0);
             let brightness = h_ratio.powf(0.3) * 0.85 + 0.15;
 
-            points.push(PointData::new(
+            points.push(SplatPoint::new(
                 Vec3::new(x, y, z),
                 1.3,
                 Vec4::new(brightness, brightness, brightness * 1.02, brightness),
@@ -141,7 +141,7 @@ fn setup(mut commands: Commands) {
         let h_ratio = (y / terrain_height_scale).min(1.0);
         let brightness = h_ratio.powf(0.5) * 0.7 + 0.1;
 
-        points.push(PointData::new(
+        points.push(SplatPoint::new(
             Vec3::new(x, y, z),
             1.0,
             Vec4::new(brightness, brightness, brightness * 1.03, brightness * 0.85),
@@ -177,7 +177,7 @@ fn setup(mut commands: Commands) {
 
         let brightness = 0.1 + r3 * 0.3;
 
-        points.push(PointData::new(
+        points.push(SplatPoint::new(
             Vec3::new(x, y, z),
             0.7,
             Vec4::new(brightness, brightness, brightness, brightness * 0.5),
@@ -186,8 +186,7 @@ fn setup(mut commands: Commands) {
 
     info!("Total points: {}", points.len());
 
-    // Just spawn PointCloud — the plugin handles mesh + material creation
-    commands.spawn(PointCloud::new(points));
+    commands.spawn(Splat3d(splats.add(Splat::new(points))));
 
     commands.spawn((
         Camera3d::default(),
