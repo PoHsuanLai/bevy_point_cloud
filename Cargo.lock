@@ -1060,18 +1060,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_point_cloud"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_panorbit_camera",
- "bytemuck",
- "cpal 0.16.0",
- "hound",
- "rustfft",
-]
-
-[[package]]
 name = "bevy_post_process"
 version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1246,6 +1234,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "wgpu-types",
+]
+
+[[package]]
+name = "bevy_splat"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_panorbit_camera",
+ "bytemuck",
+ "cpal 0.16.0",
+ "hound",
+ "rustfft",
 ]
 
 [[package]]
