@@ -10,19 +10,19 @@ categories = ["rendering", "game-development", "graphics"]
 readme = "README.md"
 
 [dependencies]
-bevy = { version = "0.17", default-features = false, features = [
+bevy = { version = "0.18", default-features = false, features = [
     "bevy_render",
     "bevy_pbr",
     "bevy_mesh",
     "bevy_asset",
     "bevy_picking",
-    "bevy_mesh_picking_backend",
+    "mesh_picking",
 ] }
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-bevy = { version = "0.17", features = ["x11", "wayland", "multi_threaded", "bevy_pbr", "bevy_mesh", "bevy_picking"] }
-bevy_panorbit_camera = "0.33"
+bevy = { version = "0.18", features = ["x11", "wayland", "multi_threaded", "bevy_pbr", "bevy_mesh", "bevy_picking"] }
+bevy_panorbit_camera = "0.34"
 cpal = "0.16"
 rustfft = "6.4"
 hound = "3.5"

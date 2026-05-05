@@ -211,16 +211,15 @@ pub(crate) struct SplatGpuBuffers {
 struct SplatPipeline {
     shader: Handle<Shader>,
     mesh_pipeline: MeshPipeline,
-    material_layout: BindGroupLayout,
+    material_layout: BindGroupLayoutDescriptor,
 }
 
 fn init_pipeline(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mesh_pipeline: Res<MeshPipeline>,
-    render_device: Res<RenderDevice>,
 ) {
-    let material_layout = render_device.create_bind_group_layout(
+    let material_layout = BindGroupLayoutDescriptor::new(
         "splat_material_layout",
         &[BindGroupLayoutEntry {
             binding: 0,
@@ -405,7 +404,7 @@ fn queue_splats(
                 entity: (entity, *main_entity),
                 pipeline: pipeline_id,
                 draw_function: draw_fn,
-                distance: rangefinder.distance_translation(&translation),
+                distance: rangefinder.distance(&translation),
                 batch_range: 0..1,
                 extra_index: PhaseItemExtraIndex::None,
                 indexed: true,
@@ -429,7 +428,9 @@ fn prepare_splat_buffers(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline: Res<SplatPipeline>,
+    pipeline_cache: Res<PipelineCache>,
 ) {
+    let material_layout = pipeline_cache.get_bind_group_layout(&pipeline.material_layout);
     for (entity, instances, params, existing) in &mut query {
         let param_bytes: &[u8] = bytemuck::bytes_of(&params.uniform);
 
@@ -464,7 +465,7 @@ fn prepare_splat_buffers(
 
                 let bind_group = render_device.create_bind_group(
                     "splat_material_bind_group",
-                    &pipeline.material_layout,
+                    &material_layout,
                     &[BindGroupEntry {
                         binding: 0,
                         resource: params_buffer.as_entire_binding(),
@@ -540,7 +541,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawSplatInstanced {
         let quad = quad.into_inner();
         pass.set_vertex_buffer(0, quad.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, gpu.instance_buffer.slice(..));
-        pass.set_index_buffer(quad.index_buffer.slice(..), 0, IndexFormat::Uint32);
+        pass.set_index_buffer(quad.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..quad.index_count, 0, 0..gpu.instance_count);
         RenderCommandResult::Success
     }
