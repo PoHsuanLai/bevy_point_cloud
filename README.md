@@ -5,7 +5,7 @@
 [![Docs.rs](https://docs.rs/bevy_splat/badge.svg)](https://docs.rs/bevy_splat)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
-GPU-instanced splat (point cloud) rendering for [Bevy](https://bevyengine.org/) 0.17.
+GPU-instanced splat (point cloud) rendering for [Bevy](https://bevyengine.org/) 0.18.
 
 Renders large point sets as camera-facing billboard quads via a single instanced draw call per entity. A shared 4-vertex quad mesh is reused via per-instance vertex buffers — no per-point mesh overhead, no SSBO. Visual settings live in a shared `SplatMaterial` asset that multiple entities can reference.
 
@@ -142,13 +142,25 @@ cargo run --example basic       # Two spheres: additive vs alpha blend
 cargo run --example terrain     # 3D Wave_ref-style terrain (~300K points)
 cargo run --example audio       # Live audio spectrum waterfall (needs WAV file)
 cargo run --example dashboard   # Composite Ryoji-Ikeda-style data panels
+cargo run --example paint       # Click-drag to paint into a GridSplat (uses bevy_cad)
 ```
+
+## Interactive paint
+
+`GridSplat3d` is paintable out of the box. Adding `SplatPlugin` wires up a
+picking proxy mesh that emits `GridCellHit` events on `Pointer<Press/Move/Release>`.
+
+The events are renderer-vocabulary only — they tell you which cell the
+pointer hit, not what to do with it. Pair with
+[`bevy_cad`](https://crates.io/crates/bevy_cad) for the brush math
+(`BrushOp`, `apply_brush`, falloff curves, ambient `ActiveBrush` resource).
+See `examples/paint.rs` for the canonical pipeline.
 
 ## Bevy compatibility
 
 | bevy_splat | Bevy |
 |------------|------|
-| 0.1        | 0.17 |
+| 0.1        | 0.18 |
 
 ## License
 

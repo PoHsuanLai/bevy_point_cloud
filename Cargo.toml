@@ -23,6 +23,8 @@ bytemuck = { version = "1", features = ["derive"] }
 [dev-dependencies]
 bevy = { version = "0.18", features = ["x11", "wayland", "multi_threaded", "bevy_pbr", "bevy_mesh", "bevy_picking"] }
 bevy_panorbit_camera = "0.34"
+# Used by `examples/paint.rs` to demonstrate the recommended brush pipeline.
+bevy_cad = { path = "../bevy_cad" }
 cpal = "0.16"
 rustfft = "6.4"
 hound = "3.5"

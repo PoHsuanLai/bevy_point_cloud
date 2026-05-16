@@ -1,12 +1,16 @@
 //! Picking glue — translates `Pointer<Press/Move/Release>` on a
-//! `GridSplat3d` entity into [`GridBrush`] events tagged with the cell
-//! the pointer hit.
+//! `GridSplat3d` entity into [`GridCellHit`] events tagged with the
+//! cell the pointer hit.
 //!
 //! `GridSplat3d` renders as splats which `bevy_picking` can't ray-cast
 //! directly. So when an entity gains `GridSplat3d`, we attach an
 //! invisible quad mesh sized to the grid's footprint as the picking
 //! proxy. `MeshPickingPlugin` raycasts that, and our observers convert
 //! the world-space hit into a cell coordinate.
+//!
+//! Brush *semantics* (what to do with the cell) live in `bevy_cad`.
+//! This module only emits cell-hit events; consumers feed them into
+//! `bevy_cad::apply_brush` with their own per-domain math.
 
 use bevy::picking::events::{Move, Pointer, Press, Release};
 use bevy::picking::mesh_picking::MeshPickingPlugin;
@@ -15,22 +19,23 @@ use bevy::prelude::*;
 
 use crate::grid::{GridSplat, GridSplat3d};
 
-/// Brush event emitted from grid pointer interaction.
+/// Pointer hit on a [`GridSplat3d`], translated into a discrete grid cell.
 ///
 /// `Begin` fires on press, `Continue` while the pointer moves with a
 /// button held, `End` on release. `cell` is the discrete grid cell the
 /// pointer hit; `world_pos` is the world-space ray hit (useful for
 /// brushes that need fractional positions, e.g. for falloff).
 #[derive(Message, Debug, Clone, Copy)]
-pub struct GridBrush {
+pub struct GridCellHit {
     pub entity: Entity,
     pub cell: UVec2,
     pub world_pos: Vec3,
-    pub phase: BrushPhase,
+    pub phase: PointerPhase,
 }
 
+/// Stroke phase carried by [`GridCellHit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrushPhase {
+pub enum PointerPhase {
     Begin,
     Continue,
     End,
@@ -42,9 +47,9 @@ pub enum BrushPhase {
 pub(crate) struct GridPickerAttached;
 
 /// Per-entity flag set when a stroke is in progress. `Move` events only
-/// emit `BrushPhase::Continue` while this is present; cleared on `Release`.
+/// emit `PointerPhase::Continue` while this is present; cleared on `Release`.
 #[derive(Component)]
-pub(crate) struct GridBrushActive;
+pub(crate) struct GridPickActive;
 
 /// Plugin that wires up grid picking. Added by `SplatPlugin` so users
 /// don't have to think about it.
@@ -72,7 +77,6 @@ pub(crate) fn attach_grid_pickers(
             continue;
         };
 
-        // Plane sized to the grid's footprint, centered on its midpoint.
         let w = grid.width as f32 * grid.cell_size.x;
         let h = grid.height as f32 * grid.cell_size.y;
         let mid = Vec3::new(
@@ -80,7 +84,6 @@ pub(crate) fn attach_grid_pickers(
             grid.origin.y,
             grid.origin.z + h * 0.5,
         );
-        // `Plane3d::default()` faces +Y; subdivisions: 0 = single quad.
         let mesh = meshes.add(Plane3d::default().mesh().size(w, h).build());
 
         let mut e = commands.entity(entity);
@@ -89,7 +92,6 @@ pub(crate) fn attach_grid_pickers(
             Mesh3d(mesh),
             Transform::from_translation(mid),
             Visibility::Visible,
-            // Mesh stays invisible (no MeshMaterial3d) but is hittable.
             Pickable::default(),
         ));
         e.observe(on_press);
@@ -103,7 +105,7 @@ fn on_press(
     mut commands: Commands,
     grids: Res<Assets<GridSplat>>,
     grid_q: Query<(&GridSplat3d, &GlobalTransform)>,
-    mut writer: MessageWriter<GridBrush>,
+    mut writer: MessageWriter<GridCellHit>,
 ) {
     let entity = event.entity;
     let Some(world_pos) = event.event.hit.position else {
@@ -118,20 +120,20 @@ fn on_press(
     let Some(cell) = world_to_cell(grid, gxform, world_pos) else {
         return;
     };
-    commands.entity(entity).insert(GridBrushActive);
-    writer.write(GridBrush {
+    commands.entity(entity).insert(GridPickActive);
+    writer.write(GridCellHit {
         entity,
         cell,
         world_pos,
-        phase: BrushPhase::Begin,
+        phase: PointerPhase::Begin,
     });
 }
 
 fn on_move(
     event: On<Pointer<Move>>,
     grids: Res<Assets<GridSplat>>,
-    grid_q: Query<(&GridSplat3d, &GlobalTransform, Has<GridBrushActive>)>,
-    mut writer: MessageWriter<GridBrush>,
+    grid_q: Query<(&GridSplat3d, &GlobalTransform, Has<GridPickActive>)>,
+    mut writer: MessageWriter<GridCellHit>,
 ) {
     let entity = event.entity;
     let Ok((grid3d, gxform, active)) = grid_q.get(entity) else {
@@ -149,11 +151,11 @@ fn on_move(
     let Some(cell) = world_to_cell(grid, gxform, world_pos) else {
         return;
     };
-    writer.write(GridBrush {
+    writer.write(GridCellHit {
         entity,
         cell,
         world_pos,
-        phase: BrushPhase::Continue,
+        phase: PointerPhase::Continue,
     });
 }
 
@@ -161,8 +163,8 @@ fn on_release(
     event: On<Pointer<Release>>,
     mut commands: Commands,
     grids: Res<Assets<GridSplat>>,
-    grid_q: Query<(&GridSplat3d, &GlobalTransform, Has<GridBrushActive>)>,
-    mut writer: MessageWriter<GridBrush>,
+    grid_q: Query<(&GridSplat3d, &GlobalTransform, Has<GridPickActive>)>,
+    mut writer: MessageWriter<GridCellHit>,
 ) {
     let entity = event.entity;
     let Ok((grid3d, gxform, active)) = grid_q.get(entity) else {
@@ -171,7 +173,7 @@ fn on_release(
     if !active {
         return;
     }
-    commands.entity(entity).remove::<GridBrushActive>();
+    commands.entity(entity).remove::<GridPickActive>();
     let Some(world_pos) = event.event.hit.position else {
         return;
     };
@@ -181,11 +183,11 @@ fn on_release(
     let Some(cell) = world_to_cell(grid, gxform, world_pos) else {
         return;
     };
-    writer.write(GridBrush {
+    writer.write(GridCellHit {
         entity,
         cell,
         world_pos,
-        phase: BrushPhase::End,
+        phase: PointerPhase::End,
     });
 }
 

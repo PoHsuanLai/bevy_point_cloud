@@ -22,7 +22,6 @@
 //!     .run();
 //! ```
 
-pub mod brush;
 pub mod grid;
 pub mod picking;
 pub mod splat;
@@ -30,9 +29,8 @@ pub mod splat_material;
 pub(crate) mod render;
 mod systems;
 
-pub use brush::{cells_in_radius, linear_falloff, smoothstep_falloff};
 pub use grid::{GridSplat, GridSplat3d};
-pub use picking::{BrushPhase, GridBrush};
+pub use picking::{GridCellHit, PointerPhase};
 pub use splat::{Splat, Splat3d, SplatPoint};
 pub use splat_material::{SplatBlend, SplatMaterial, SplatMaterial3d, SplatShape};
 
@@ -51,7 +49,7 @@ impl Plugin for SplatPlugin {
         app.init_asset::<Splat>()
             .init_asset::<SplatMaterial>()
             .init_asset::<GridSplat>()
-            .add_message::<GridBrush>()
+            .add_message::<GridCellHit>()
             .register_asset_reflect::<Splat>()
             .register_asset_reflect::<SplatMaterial>()
             .register_asset_reflect::<GridSplat>()

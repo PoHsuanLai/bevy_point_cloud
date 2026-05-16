@@ -532,6 +532,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_cad"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "bevy_math",
+ "bevy_reflect",
+]
+
+[[package]]
 name = "bevy_camera"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1344,6 +1354,7 @@ name = "bevy_splat"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_cad",
  "bevy_panorbit_camera",
  "bytemuck",
  "cpal 0.16.0",
